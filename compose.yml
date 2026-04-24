@@ -1,15 +1,13 @@
 # Choiz MCP Gateway stack
 #
-# Four-layer design:
-#   Claude -> Cloudflare Worker -> cloudflared tunnel -> gateway -> mcp adapter(s) -> upstream MCP(s)
+#   Claude -> Cloudflare Worker -> cloudflared tunnel -> gateway -> MCP container(s)
 #
-# The adapter layer (supergateway) translates the upstream SSE transport into
-# MCP Streamable HTTP, which is what claude.ai speaks. Without it, claude.ai
-# POSTs JSON-RPC messages straight to /sse and the SSE-transport upstream
-# rejects them with 405.
+# Each MCP container speaks MCP Streamable HTTP (what claude.ai uses). If the
+# underlying MCP server only speaks stdio, we wrap it with supergateway inside
+# the same container (see ./mcp/warehouse/Dockerfile).
 #
 # Only the gateway is reachable from cloudflared (127.0.0.1:8080).
-# Adapter and upstream containers are on an internal Docker network.
+# MCP containers are on an internal Docker network.
 
 services:
   gateway:
@@ -17,38 +15,17 @@ services:
     environment:
       PORT: "8080"
       WORKER_SHARED_SECRET: ${WORKER_SHARED_SECRET:?set WORKER_SHARED_SECRET in .env}
-      # Point at the adapter, not the raw SSE upstream.
-      UPSTREAM_WAREHOUSE: "http://mcp_adapter_warehouse:8080"
+      UPSTREAM_WAREHOUSE: "http://warehouse_mcp:8080"
     ports:
       # Bind only to the host's loopback; cloudflared runs on the same host.
       - "127.0.0.1:8080:8080"
     depends_on:
-      - mcp_adapter_warehouse
+      - warehouse_mcp
     restart: unless-stopped
 
-  # Bridges upstream SSE -> Streamable HTTP. Same pattern for every new MCP
-  # that only speaks SSE: one adapter container per MCP, on a dedicated port.
-  mcp_adapter_warehouse:
-    image: supercorp/supergateway:latest
-    command:
-      - "--sse"
-      - "http://postgres_wh_mcp:8000/sse"
-      - "--outputTransport"
-      - "streamableHttp"
-      - "--port"
-      - "8080"
-    depends_on:
-      - postgres_wh_mcp
-    restart: unless-stopped
-
-  postgres_wh_mcp:
-    image: crystaldba/postgres-mcp:latest
+  warehouse_mcp:
+    build: ./mcp/warehouse
     environment:
       DATABASE_URI: ${WAREHOUSE_DATABASE_URL:?set WAREHOUSE_DATABASE_URL in .env}
-    command:
-      - "--access-mode=restricted"
-      - "--transport=sse"
-      - "--sse-host=0.0.0.0"
-      - "--sse-port=8000"
     restart: unless-stopped
-    # No ports: block. Adapter reaches it by service name on the internal network.
+    # No ports: block. Gateway reaches it by service name on the internal network.
