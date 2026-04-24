@@ -1,6 +1,6 @@
 # choiz-mcp-gateway
 
-Remote MCP gateway for the Choiz internal team. A single HTTP service that exposes custom MCP servers over HTTPS behind Google Workspace SSO, so team members can add one URL to Claude.ai (or Claude Desktop) as a Custom Connector instead of editing `claude_desktop_config.json` individually.
+Remote MCP gateway for the Choiz internal team. A single HTTPS URL (`https://mcp.choiz.com.mx`) that the team can add to Claude.ai (web or Desktop) as a Custom Connector, so people stop editing `claude_desktop_config.json` individually.
 
 ## Architecture
 
@@ -8,61 +8,75 @@ Remote MCP gateway for the Choiz internal team. A single HTTP service that expos
 Claude (web or Desktop)
   -> Cloudflare Worker     (OAuth 2.0 + DCR, federates to Google Workspace)
   -> Cloudflare Tunnel     (no inbound ports opened on AWS)
-  -> this gateway          (runs in Docker on existing EC2 inside the VPC)
-  -> AWS VPC resources     (RDS warehouse, future: dbt, SQLMesh, internal APIs)
+  -> gateway container     (auth proxy, routes /mcp/<name> to upstream MCP)
+  -> upstream MCP(s)       (each one its own Docker service)
+  -> AWS VPC resources     (RDS warehouse, etc.)
 ```
 
-## Endpoints
+The gateway itself does not implement MCP protocol — it is a thin authenticated reverse proxy. Each upstream MCP runs as its own service in `compose.yml`.
 
-| Path | MCP |
+## Stack services
+
+| Service | Purpose |
 |---|---|
-| `POST/GET/DELETE /warehouse` | Read-only SQL access to the data warehouse |
-| `GET /healthz` | Liveness probe |
+| `gateway` | Validates Worker shared secret + user email, routes `/mcp/<name>` to the right upstream. Listens on `127.0.0.1:8080`. |
+| `postgres_wh_mcp` | Wraps the data warehouse. Based on public image `crystaldba/postgres-mcp` in `restricted` access mode (read-only, no schema changes). |
 
-Every request must carry two headers set by the Cloudflare Worker:
+## Routes
 
-- `X-Worker-Shared-Secret`: must match `WORKER_SHARED_SECRET` env var
-- `X-Choiz-User-Email`: verified email of the authenticated user (must end in `@choiz.com.mx`)
+| Path | Upstream | Notes |
+|---|---|---|
+| `POST/GET /mcp/warehouse` | `postgres_wh_mcp` | Read-only SQL access to the warehouse |
+| `GET /healthz` | — | Liveness probe, no auth |
 
-Requests that reach the gateway without both headers are rejected with `401`.
+Every `/mcp/*` request must carry two headers set by the Cloudflare Worker:
 
-## Environment variables
+- `X-Worker-Shared-Secret` — must match `WORKER_SHARED_SECRET`
+- `X-Choiz-User-Email` — verified Google Workspace email, must end in `@choiz.com.mx`
 
-See [`.env.example`](./.env.example).
-
-## Local development
-
-```bash
-npm install
-cp .env.example .env
-# fill in WAREHOUSE_DATABASE_URL and WORKER_SHARED_SECRET
-npm run dev
-```
-
-Smoke test (simulates the Worker):
-
-```bash
-curl -X POST http://localhost:8080/warehouse \
-  -H "Content-Type: application/json" \
-  -H "X-Worker-Shared-Secret: $WORKER_SHARED_SECRET" \
-  -H "X-Choiz-User-Email: you@choiz.com.mx" \
-  -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"curl","version":"0"}}}'
-```
+Requests without both headers are rejected with `401`.
 
 ## Deployment
 
-Runs as a Docker container on the EC2 that hosts the Airflow / Airbyte pipeline. The container binds to `localhost:8080` and is reached by `cloudflared` (Cloudflare Tunnel) on the same host. No inbound ports are opened in the security group.
+Runs on a dedicated EC2 (`t4g.small`, Ubuntu 24.04 ARM) in the same VPC as the RDS warehouse. Admin access is via AWS SSM Session Manager (no SSH, no VPN). Public access is via Cloudflare Tunnel.
 
-See [`docs/deploy.md`](./docs/deploy.md) (coming soon).
+### First-time bring-up on EC2
+
+```bash
+# 1. Clone
+cd ~
+git clone https://github.com/Choizapp/choiz-mcp-gateway.git
+cd choiz-mcp-gateway
+
+# 2. Create .env
+cp .env.example .env
+nano .env
+# Fill in WORKER_SHARED_SECRET and WAREHOUSE_DATABASE_URL.
+
+# 3. Bring the stack up
+docker compose up -d --build
+
+# 4. Smoke test locally (simulates the Worker)
+curl -i http://localhost:8080/healthz
+```
+
+### Updating
+
+```bash
+cd ~/choiz-mcp-gateway
+git pull
+docker compose up -d --build
+```
 
 ## Adding a new MCP
 
-1. Create `src/mcps/<name>.ts` exporting `createXServer(userEmail: string): McpServer`.
-2. In `src/index.ts`, add `mountMcp("/<name>", createXServer);`.
-3. Optionally add to `/all` (upcoming).
+1. Add a service block to `compose.yml`.
+2. Add a new `UPSTREAM_<NAME>` env var in the `gateway` service.
+3. Add the entry to `upstreams` in [`gateway/src/index.ts`](gateway/src/index.ts).
+4. Rebuild: `docker compose up -d --build`.
 
 ## Security notes
 
-- The gateway trusts the email header **only** when the shared secret header matches. The tunnel is not publicly reachable; only the Worker can hit it.
-- The warehouse MCP enforces read-only at the query level (statement prefix check) AND at the Postgres transaction level (`SET TRANSACTION READ ONLY`).
-- Every query tags `application_name = mcp:<email>` so `pg_stat_activity` and query logs are auditable per user.
+- The tunnel URL is technically reachable from the public internet; the shared secret prevents any caller other than the Cloudflare Worker from talking to the gateway.
+- `postgres_wh_mcp` is **not** exposed on any host port — it only accepts connections from the `gateway` container over the internal Docker network.
+- The Postgres role used by `postgres_wh_mcp` must be a read-only role. The `--access-mode=restricted` flag is belt-and-suspenders.
