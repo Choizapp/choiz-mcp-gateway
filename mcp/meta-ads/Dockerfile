@@ -10,7 +10,7 @@
 
 FROM node:20-slim
 
-ARG META_ADS_SHA=fe38c9eb5998dc4ad73a163b89c64085afaf300a
+ARG META_ADS_SHA=6300075729401efe41a81780360dc9ac735e875b
 
 # git is only needed at build time to fetch the source.
 RUN apt-get update \
