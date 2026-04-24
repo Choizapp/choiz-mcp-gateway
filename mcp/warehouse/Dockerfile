@@ -39,5 +39,6 @@ ENTRYPOINT ["supergateway"]
 CMD [ \
   "--stdio", "postgres-mcp --access-mode=restricted", \
   "--outputTransport", "streamableHttp", \
-  "--port", "8080" \
+  "--port", "8080", \
+  "--streamableHttpPath", "/" \
 ]
