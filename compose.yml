@@ -16,11 +16,13 @@ services:
       PORT: "8080"
       WORKER_SHARED_SECRET: ${WORKER_SHARED_SECRET:?set WORKER_SHARED_SECRET in .env}
       UPSTREAM_WAREHOUSE: "http://warehouse_mcp:8080"
+      UPSTREAM_META_ADS: "http://meta_ads_mcp:8080"
     ports:
       # Bind only to the host's loopback; cloudflared runs on the same host.
       - "127.0.0.1:8080:8080"
     depends_on:
       - warehouse_mcp
+      - meta_ads_mcp
     restart: unless-stopped
 
   warehouse_mcp:
@@ -29,3 +31,9 @@ services:
       DATABASE_URI: ${WAREHOUSE_DATABASE_URL:?set WAREHOUSE_DATABASE_URL in .env}
     restart: unless-stopped
     # No ports: block. Gateway reaches it by service name on the internal network.
+
+  meta_ads_mcp:
+    build: ./mcp/meta-ads
+    environment:
+      META_ACCESS_TOKEN: ${META_ACCESS_TOKEN:?set META_ACCESS_TOKEN in .env}
+    restart: unless-stopped

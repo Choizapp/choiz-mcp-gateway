@@ -8,7 +8,7 @@ const app = express();
 // Add a new entry here when you add a new MCP container to compose.yml.
 const upstreams: Record<string, string | undefined> = {
   "/mcp/warehouse": process.env.UPSTREAM_WAREHOUSE,
-  // "/mcp/fabric":   process.env.UPSTREAM_FABRIC,
+  "/mcp/meta-ads":  process.env.UPSTREAM_META_ADS,
 };
 
 // --- Health check (no auth) ---
