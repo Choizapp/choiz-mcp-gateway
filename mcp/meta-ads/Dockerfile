@@ -18,10 +18,21 @@ RUN apt-get update \
  && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
+
+# Split into separate layers so a failure in npm ci (often network-flaky on
+# small EC2 instances) doesn't force re-cloning. Each layer is cached
+# independently by Docker.
 RUN git clone https://github.com/Choizapp/choiz-meta-ads-mcp.git . \
- && git checkout "${META_ADS_SHA}" \
- && npm ci \
- && npm run build \
+ && git checkout "${META_ADS_SHA}"
+
+# npm retry flags: the default (2 retries, 10s max timeout) is not enough on
+# constrained networks. Extend both.
+RUN npm config set fetch-retries 5 \
+ && npm config set fetch-retry-mintimeout 20000 \
+ && npm config set fetch-retry-maxtimeout 120000 \
+ && npm ci --no-audit --no-fund
+
+RUN npm run build \
  && npm prune --omit=dev
 
 # supergateway bridges stdio <-> Streamable HTTP.
