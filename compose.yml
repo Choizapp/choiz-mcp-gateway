@@ -1,10 +1,15 @@
 # Choiz MCP Gateway stack
 #
-# Three-layer design:
-#   Claude -> Cloudflare Worker -> cloudflared tunnel -> gateway -> upstream MCP(s)
+# Four-layer design:
+#   Claude -> Cloudflare Worker -> cloudflared tunnel -> gateway -> mcp adapter(s) -> upstream MCP(s)
+#
+# The adapter layer (supergateway) translates the upstream SSE transport into
+# MCP Streamable HTTP, which is what claude.ai speaks. Without it, claude.ai
+# POSTs JSON-RPC messages straight to /sse and the SSE-transport upstream
+# rejects them with 405.
 #
 # Only the gateway is reachable from cloudflared (127.0.0.1:8080).
-# Upstream MCP containers are on an internal Docker network, not exposed.
+# Adapter and upstream containers are on an internal Docker network.
 
 services:
   gateway:
@@ -12,10 +17,26 @@ services:
     environment:
       PORT: "8080"
       WORKER_SHARED_SECRET: ${WORKER_SHARED_SECRET:?set WORKER_SHARED_SECRET in .env}
-      UPSTREAM_WAREHOUSE: "http://postgres_wh_mcp:8000"
+      # Point at the adapter, not the raw SSE upstream.
+      UPSTREAM_WAREHOUSE: "http://mcp_adapter_warehouse:8080"
     ports:
       # Bind only to the host's loopback; cloudflared runs on the same host.
       - "127.0.0.1:8080:8080"
+    depends_on:
+      - mcp_adapter_warehouse
+    restart: unless-stopped
+
+  # Bridges upstream SSE -> Streamable HTTP. Same pattern for every new MCP
+  # that only speaks SSE: one adapter container per MCP, on a dedicated port.
+  mcp_adapter_warehouse:
+    image: supercorp/supergateway:latest
+    command:
+      - "--sse"
+      - "http://postgres_wh_mcp:8000/sse"
+      - "--outputTransport"
+      - "streamableHttp"
+      - "--port"
+      - "8080"
     depends_on:
       - postgres_wh_mcp
     restart: unless-stopped
@@ -30,4 +51,4 @@ services:
       - "--sse-host=0.0.0.0"
       - "--sse-port=8000"
     restart: unless-stopped
-    # No ports: block. The gateway reaches it by service name on the internal network.
+    # No ports: block. Adapter reaches it by service name on the internal network.
