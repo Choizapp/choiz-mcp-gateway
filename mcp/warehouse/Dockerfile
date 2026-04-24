@@ -6,16 +6,28 @@
 # We combine them in one container because supergateway only translates
 # stdio -> (sse|ws|streamableHttp); it does NOT do sse -> streamableHttp. So
 # we need postgres-mcp on stdin/stdout of supergateway.
+#
+# Base is python-slim (Debian) rather than node-alpine because installing a
+# Python package cleanly inside Alpine's musl + pipx combo has proven fragile
+# on ARM64. Adding Node on top of a Python base is straightforward.
 
-FROM node:20-alpine
+FROM python:3.12-slim
 
-# Python + pipx so postgres-mcp's CLI ends up on PATH in a venv.
-RUN apk add --no-cache python3 py3-pip pipx \
-    && pipx ensurepath \
-    && pipx install postgres-mcp
-ENV PATH="/root/.local/bin:${PATH}"
+# Node.js LTS + build tools needed for native npm deps.
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends curl ca-certificates gnupg \
+ && curl -fsSL https://deb.nodesource.com/setup_20.x | bash - \
+ && apt-get install -y --no-install-recommends nodejs \
+ && apt-get clean \
+ && rm -rf /var/lib/apt/lists/*
 
-# supergateway is published to npm.
+# postgres-mcp from PyPI. We use a venv under /opt so it doesn't conflict
+# with the system Python environment (PEP 668).
+RUN python -m venv /opt/venv
+ENV PATH="/opt/venv/bin:${PATH}"
+RUN pip install --no-cache-dir postgres-mcp
+
+# supergateway from npm, global install.
 RUN npm install -g supergateway
 
 EXPOSE 8080
