@@ -5,29 +5,38 @@ Snapshot of where this project is and what's left to do. Update this file whenev
 ## What works today
 
 - Full OAuth flow: Claude.ai ↔ Worker ↔ Google Workspace ↔ `@choiz.com.mx` users.
-- One MCP behind the gateway: **warehouse** (read-only SQL access to the RDS warehouse via `postgres-mcp` wrapped by `supergateway`).
+- Two MCPs behind the gateway:
+  - **warehouse** (read-only SQL access to the RDS warehouse via `postgres-mcp` wrapped by `supergateway`).
+  - **meta-ads** (Choiz fork of `pipeboard-co/meta-ads-mcp`, Node stdio wrapped with `supergateway`). End-to-end verified from claude.ai. See [meta-ads deployed-state memory] for SHA pinning details — `Dockerfile` pins `META_ADS_SHA=6300075…` but EC2 currently runs the previous build (`fe38c9e…`) because the rebuild on 2026-04-24 OOM-killed during `npm ci`.
 - End-to-end verified from Claude.ai: connector shows Connected, tool calls return results.
 - Cloudflare Tunnel + Worker + gateway + MCP container stack is production-shaped (systemd, restart policies, no inbound ports, SSM-only admin).
 - Pilot user: `sabruzzini@choiz.com.mx`.
 
 ## Not started / next up
 
-Ordered by impact vs. effort. Do them roughly top-to-bottom.
+Ordered by impact vs. effort. **Item 2 (CI/CD) is now a prerequisite for item 1** — see resource note below.
 
 ### 1. Migrate more MCPs off of local `claude_desktop_config.json`
 
 Use [ADDING_AN_MCP.md](ADDING_AN_MCP.md) as the recipe.
 
-Candidates (fill this in with the list from your local config):
+Agreed queue (see migration-order memory):
 
-- [ ] MCP `_____` — notes:
-- [ ] MCP `_____` — notes:
-- [ ] MCP `_____` — notes:
+- [x] **meta-ads** — done, except trailing tool-description deploy (image `6300075` pushed, not built on EC2).
+- [ ] **facebook** (choiz + timeless tenants) — two containers per the multi-tenant pattern.
+- [ ] **instagram** (choiz + timeless).
+- [ ] **ga4** + **gsc** (choiz + timeless each).
+- [ ] **tiktok-ads** (choiz only; ignore tiktok-organic for now).
+- [ ] **google-ads**.
+- [ ] **kapso** + **posthog** — already remote, but wrap through gateway to hide keys / brand as official.
+- [ ] **power-bi** — special case, deferred (token expiry issue, see memory).
 
 For each one, decide whether it belongs on the gateway:
 
 - **Yes**: talks to a network service (APIs, databases, SaaS) and could be useful to more than one person.
 - **No**: needs local filesystem access or per-user credentials that can't be centralized. Leave those in the user's desktop config.
+
+> ⚠️ **Do CI/CD (item 2) before migrating MCP #3.** The t3.micro can't reliably build heavy Node MCPs in-place — meta-ads' rebuild on 2026-04-24 OOM-killed and took the SSM agent offline (containers stayed up on the old image via `restart: unless-stopped`, so prod didn't break, but the new image never landed). Either add a swapfile + prune the builder cache to unblock individual rebuilds, or — better — move builds off the EC2 entirely (item 2). See the EC2-resource-problem memory for the exact commands.
 
 ### 2. CI/CD with GitHub Actions
 
