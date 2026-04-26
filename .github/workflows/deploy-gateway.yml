@@ -164,7 +164,7 @@ jobs:
             --instance-ids "$INSTANCE_ID" \
             --document-name "AWS-RunShellScript" \
             --comment "Deploy gateway from ${GIT_SHA:0:7}" \
-            --parameters "commands=[\"set -euo pipefail\",\"cd ${REPO_PATH}\",\"git fetch origin master\",\"git checkout master\",\"git pull --ff-only origin master\",\"docker compose pull\",\"docker compose up -d\",\"docker image prune -f\",\"docker compose ps\"]" \
+            --parameters "commands=[\"set -eu\",\"cd ${REPO_PATH}\",\"git fetch origin master\",\"git checkout master\",\"git pull --ff-only origin master\",\"docker compose pull\",\"docker compose up -d\",\"docker image prune -f\",\"docker compose ps\"]" \
             --query 'Command.CommandId' --output text)
           echo "command_id=$CMD_ID" >> "$GITHUB_OUTPUT"
           echo "Sent SSM command $CMD_ID"
