@@ -38,17 +38,28 @@ The Worker has observability enabled; logs also live in the Cloudflare dashboard
 ### Gateway or MCP containers
 
 ```bash
-cd ~/choiz-mcp-gateway
-git pull
-docker compose up -d --build
-docker compose ps
+git push origin master
 ```
 
-`docker compose up -d --build` is idempotent — unchanged services are not restarted.
+That's it. GitHub Actions builds the changed images on `linux/arm64`, pushes them to GHCR, and runs `docker compose pull && up -d` on the EC2 via SSM. Watch the run at https://github.com/Choizapp/choiz-mcp-gateway/actions. End-to-end takes ~5-15 min depending on which images rebuild (meta-ads is the slowest under QEMU).
+
+See [CICD.md](CICD.md) for the full pipeline reference, secrets/role setup, and rollback procedure.
+
+If CI/CD is unavailable and you need to deploy by hand from the EC2:
+
+```bash
+# Edit /home/ssm-user/choiz-mcp-gateway/compose.yml inline if needed
+cd /home/ssm-user/choiz-mcp-gateway
+sudo docker compose pull
+sudo docker compose up -d
+sudo docker compose ps
+```
+
+This pulls the latest `:latest` image from GHCR. Works as long as `docker login ghcr.io` is still cached as root.
 
 ### Cloudflare Worker
 
-From any machine with the repo + wrangler login:
+CI/CD also handles this — push any change under `worker/**` to `master` and `.github/workflows/deploy-worker.yml` runs `wrangler deploy`. Manual fallback from your laptop:
 
 ```bash
 cd worker
@@ -135,7 +146,7 @@ There is intentionally no state worth backing up on the EC2.
 - The repo is the source of truth; it lives in GitHub.
 - Secrets live on the EC2 `.env` + in Wrangler secrets. Store the master copies in a password manager.
 - Cloudflare KV (tokens + DCR registrations) rebuilds itself: users re-auth after a wipe and connectors re-register.
-- If the EC2 is destroyed, the recovery path is: launch a new EC2 with the same IAM role, clone the repo, restore `.env`, `docker compose up -d --build`, and re-run the cloudflared setup (login + create + config + systemd install).
+- If the EC2 is destroyed, the recovery path is: launch a new EC2 (ARM64 / Graviton) with the same IAM role + SSM agent, copy `compose.yml` from the repo and restore `.env`, `sudo docker login ghcr.io` as root, `sudo docker compose pull && up -d`, then re-run the cloudflared setup (login + create + config + systemd install). Update `EC2_INSTANCE_ID` in GitHub repo secrets so CI/CD targets the new instance.
 
 ## Cost
 

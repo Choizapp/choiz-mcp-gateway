@@ -6,9 +6,11 @@ Builds run on GitHub Actions, images are pushed to GHCR (GitHub Container Regist
 
 | Trigger | What happens |
 |---|---|
-| Push to `master` touching `gateway/**`, `mcp/**`, or `compose.yml` | `.github/workflows/deploy-gateway.yml` builds only the changed images, pushes them to GHCR, then sends an SSM command to the EC2 to `git pull && docker compose pull && docker compose up -d` |
+| Push to `master` touching `gateway/**`, `mcp/**`, or `compose.yml` | `.github/workflows/deploy-gateway.yml` builds only the changed images for `linux/arm64` (EC2 is Graviton), pushes them to GHCR, then sends an SSM command to the EC2 that base64-pushes the new `compose.yml` inline and runs `docker compose pull && up -d` |
 | Push to `master` touching `worker/**` | `.github/workflows/deploy-worker.yml` runs `wrangler deploy` |
 | Manual dispatch | Both workflows expose `workflow_dispatch` for forced rebuilds/deploys |
+
+The deploy step does **not** run `git pull` on the EC2 — `compose.yml` is shipped over the SSM payload itself, so the EC2 needs no GitHub credentials and the file always matches the deployed commit.
 
 Image naming on GHCR:
 
@@ -141,16 +143,15 @@ sudo cat /root/.docker/config.json
 
 `sudo` matters — SSM Run Command runs as root, so the credentials must be in root's Docker config, not `ssm-user`'s.
 
-### 5. EC2 — make sure the repo is at the expected path
+### 5. EC2 — make sure the target directory exists
 
-The deploy script does `cd $EC2_REPO_PATH && git pull --ff-only`. Confirm:
+The deploy script does `mkdir -p $EC2_REPO_PATH` before writing `compose.yml`, so the path doesn't have to pre-exist — but it does need to be the same path the `.env` file lives in (since `docker compose` reads both from the same dir). Confirm:
 
 ```bash
-ls /home/ssm-user/choiz-mcp-gateway/compose.yml
-cd /home/ssm-user/choiz-mcp-gateway && git status
+ls /home/ssm-user/choiz-mcp-gateway/.env
 ```
 
-If the path is different from what you stored in `EC2_REPO_PATH`, update either the variable or move the repo.
+If `.env` lives elsewhere, set `EC2_REPO_PATH` to that directory.
 
 ## How to deploy day-to-day
 
@@ -192,5 +193,6 @@ docker compose -f compose.yml -f compose.dev.yml up --build
 | Workflow fails at `Configure AWS credentials` with `AccessDenied` | Trust policy `sub` claim does not match `repo:Choizapp/choiz-mcp-gateway:ref:refs/heads/master`. Check the OIDC token claims in the failed run's log |
 | Workflow fails at `wrangler deploy` with 401/403 | `CLOUDFLARE_API_TOKEN` is missing the right scopes or the wrong zone |
 | `docker compose pull` fails on EC2 with `unauthorized` | PAT expired or `docker login ghcr.io` was not done as root. Re-run step 4 |
-| `git pull --ff-only` fails | EC2 has uncommitted local changes or diverged from master. SSM in, resolve manually, re-run the workflow |
+| `docker compose pull` fails with `no matching manifest for linux/arm64/v8` | An image was built without `platforms: linux/arm64`. Check the build job in `deploy-gateway.yml` |
 | SSM step times out | Instance is not reachable by SSM agent. Reboot the instance from AWS Console; verify SSM agent is running with `systemctl status amazon-ssm-agent` |
+| Workflow runs but no images get rebuilt and deploy is skipped | Expected when only the workflow file or unrelated docs changed. To force a rebuild, use **Run workflow** (workflow_dispatch) on the Actions tab |

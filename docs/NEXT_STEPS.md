@@ -7,22 +7,23 @@ Snapshot of where this project is and what's left to do. Update this file whenev
 - Full OAuth flow: Claude.ai ↔ Worker ↔ Google Workspace ↔ `@choiz.com.mx` users.
 - Two MCPs behind the gateway:
   - **warehouse** (read-only SQL access to the RDS warehouse via `postgres-mcp` wrapped by `supergateway`).
-  - **meta-ads** (Choiz fork of `pipeboard-co/meta-ads-mcp`, Node stdio wrapped with `supergateway`). End-to-end verified from claude.ai. See [meta-ads deployed-state memory] for SHA pinning details — `Dockerfile` pins `META_ADS_SHA=6300075…` but EC2 currently runs the previous build (`fe38c9e…`) because the rebuild on 2026-04-24 OOM-killed during `npm ci`.
+  - **meta-ads** (Choiz fork of `pipeboard-co/meta-ads-mcp`, Node stdio wrapped with `supergateway`). End-to-end verified from claude.ai. Running SHA `6300075` since 2026-04-26 via CI/CD.
 - End-to-end verified from Claude.ai: connector shows Connected, tool calls return results.
 - Cloudflare Tunnel + Worker + gateway + MCP container stack is production-shaped (systemd, restart policies, no inbound ports, SSM-only admin).
+- **CI/CD live** (deployed 2026-04-26). GitHub Actions builds ARM64 images → pushes to GHCR → SSM pushes `compose.yml` to EC2 + `docker compose pull && up -d`. EC2 no longer builds anything. See [CICD.md](CICD.md).
 - Pilot user: `sabruzzini@choiz.com.mx`.
 
 ## Not started / next up
 
-Ordered by impact vs. effort. **Item 2 (CI/CD) is now a prerequisite for item 1** — see resource note below.
+Ordered by impact vs. effort.
 
 ### 1. Migrate more MCPs off of local `claude_desktop_config.json`
 
-Use [ADDING_AN_MCP.md](ADDING_AN_MCP.md) as the recipe.
+Use [ADDING_AN_MCP.md](ADDING_AN_MCP.md) as the recipe. With CI/CD live, adding a new MCP is now: write a Dockerfile, add a service to `compose.yml`, add a `build-<name>` job to `.github/workflows/deploy-gateway.yml`, push. No on-EC2 work.
 
 Agreed queue (see migration-order memory):
 
-- [x] **meta-ads** — done, except trailing tool-description deploy (image `6300075` pushed, not built on EC2).
+- [x] **meta-ads** — done end-to-end, including the trailing tool-description deploy.
 - [ ] **facebook** (choiz + timeless tenants) — two containers per the multi-tenant pattern.
 - [ ] **instagram** (choiz + timeless).
 - [ ] **ga4** + **gsc** (choiz + timeless each).
@@ -36,24 +37,7 @@ For each one, decide whether it belongs on the gateway:
 - **Yes**: talks to a network service (APIs, databases, SaaS) and could be useful to more than one person.
 - **No**: needs local filesystem access or per-user credentials that can't be centralized. Leave those in the user's desktop config.
 
-> ⚠️ **Do CI/CD (item 2) before migrating MCP #3.** The t3.micro can't reliably build heavy Node MCPs in-place — meta-ads' rebuild on 2026-04-24 OOM-killed and took the SSM agent offline (containers stayed up on the old image via `restart: unless-stopped`, so prod didn't break, but the new image never landed). Either add a swapfile + prune the builder cache to unblock individual rebuilds, or — better — move builds off the EC2 entirely (item 2). See the EC2-resource-problem memory for the exact commands.
-
-### 2. CI/CD with GitHub Actions
-
-Manual `docker compose up -d --build` on the EC2 is fine now, but it won't scale once multiple people are editing this repo. Plan:
-
-- **`deploy-gateway.yml`**: on push to `main`, if `gateway/**`, `compose.yml`, or `mcp/**` changed → GitHub Actions uses OIDC to assume an IAM role on AWS → `aws ssm send-command` to the EC2 → runs `cd ~/choiz-mcp-gateway && git pull && docker compose up -d --build`.
-- **`deploy-worker.yml`**: on push to `main`, if `worker/**` changed → `wrangler deploy` using a `CLOUDFLARE_API_TOKEN` repo secret.
-
-Both run on GitHub-hosted runners (no self-hosted runner to maintain).
-
-Prerequisites:
-
-- Create an IAM OIDC provider for GitHub in the AWS account.
-- Create an IAM role `choiz-mcp-gateway-ci` with a trust policy scoped to the repo + branch, and permissions limited to `ssm:SendCommand` on the specific instance.
-- Mint a Cloudflare API token with `Workers Scripts: Edit` + `Workers KV Storage: Edit` on the zone `choiz.com.mx`. Store as repo secret `CLOUDFLARE_API_TOKEN`.
-
-### 3. Team rollout
+### 2. Team rollout
 
 Once at least 3-4 useful MCPs are on the gateway:
 
@@ -65,7 +49,7 @@ Once at least 3-4 useful MCPs are on the gateway:
 - Pilot with 2-3 early adopters from the data team for a week.
 - Open rollout to the 15 people on Team plan.
 
-### 4. Nice-to-have hardening
+### 3. Nice-to-have hardening
 
 Not blocking, but worth doing eventually:
 
@@ -73,9 +57,11 @@ Not blocking, but worth doing eventually:
 - **Per-user query attribution**: have the gateway inject `SET application_name = '<user_email>'` before each connection. Requires switching from `postgres-mcp` to a fork or a small shim; not trivial.
 - **Structured logs**: the gateway currently `console.log`s; pipe to Cloudwatch via the SSM agent or a sidecar for searchable history.
 - **Rate limiting**: a user hammering the warehouse via Claude.ai could DoS it. Add a per-user token bucket in the Worker (Cloudflare has durable objects for this).
+- **Slim down the EC2 repo clone**: now that CI/CD pushes `compose.yml` via SSM, the rest of the repo on EC2 (`gateway/`, `mcp/`, `docs/`, etc.) is unused at runtime. Could be pruned to just `compose.yml` + `.env` for clarity.
+- **Image rollback ergonomics**: `:latest` is convenient but rollbacks require knowing the old SHA. Could add a small script that lists recent SHAs in GHCR and pins one in `.env` via `IMAGE_TAG`.
 - **Secondary maintainer**: document who the backup maintainer is so this doesn't single-thread on one person.
 
-### 5. Known pending decisions
+### 4. Known pending decisions
 
 - Which Postgres role does `warehouse_mcp` use? (currently: whatever `WAREHOUSE_DATABASE_URL` in the EC2 `.env` points to — check it's read-only).
 - Do we want to retain MCP call audit logs beyond the Worker's 100-event in-memory buffer?
@@ -91,3 +77,5 @@ Not blocking, but worth doing eventually:
 - **Worker** — A Cloudflare serverless function. Runs JS at the edge in every Cloudflare datacenter. Our Worker handles OAuth and proxies `/mcp/*` to the tunnel.
 - **Tunnel** — Cloudflare's outbound-only reverse proxy. The `cloudflared` daemon on the EC2 opens an outbound connection to Cloudflare; incoming traffic is routed over that connection. No inbound ports needed.
 - **SSM** — AWS Systems Manager Session Manager. IAM-authenticated shell into EC2, no SSH keys, no open port 22.
+- **GHCR** — GitHub Container Registry (`ghcr.io`). Where CI/CD pushes built images, scoped to the `Choizapp` org.
+- **OIDC** (in CI context) — OpenID Connect. Lets GitHub Actions assume an AWS IAM role without long-lived AWS keys.
