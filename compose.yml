@@ -21,12 +21,16 @@ services:
       WORKER_SHARED_SECRET: ${WORKER_SHARED_SECRET:?set WORKER_SHARED_SECRET in .env}
       UPSTREAM_WAREHOUSE: "http://warehouse_mcp:8080"
       UPSTREAM_META_ADS: "http://meta_ads_mcp:8080"
+      UPSTREAM_FACEBOOK_CHOIZ: "http://facebook_choiz_mcp:8080"
+      UPSTREAM_FACEBOOK_TIMELESS: "http://facebook_timeless_mcp:8080"
     ports:
       # Bind only to the host's loopback; cloudflared runs on the same host.
       - "127.0.0.1:8080:8080"
     depends_on:
       - warehouse_mcp
       - meta_ads_mcp
+      - facebook_choiz_mcp
+      - facebook_timeless_mcp
     restart: unless-stopped
 
   warehouse_mcp:
@@ -40,4 +44,21 @@ services:
     image: ghcr.io/choizapp/choiz-mcp-gateway/meta-ads:${IMAGE_TAG:-latest}
     environment:
       META_ACCESS_TOKEN: ${META_ACCESS_TOKEN:?set META_ACCESS_TOKEN in .env}
+    restart: unless-stopped
+
+  # Facebook MCP — multi-tenant pattern: one container per Choiz tenant,
+  # both built from the same image, only env (token + page id) differs.
+  # Slug convention: /mcp/facebook-<tenant>/.
+  facebook_choiz_mcp:
+    image: ghcr.io/choizapp/choiz-mcp-gateway/facebook:${IMAGE_TAG:-latest}
+    environment:
+      FACEBOOK_ACCESS_TOKEN: ${FACEBOOK_CHOIZ_ACCESS_TOKEN:?set FACEBOOK_CHOIZ_ACCESS_TOKEN in .env}
+      FACEBOOK_PAGE_ID: ${FACEBOOK_CHOIZ_PAGE_ID:?set FACEBOOK_CHOIZ_PAGE_ID in .env}
+    restart: unless-stopped
+
+  facebook_timeless_mcp:
+    image: ghcr.io/choizapp/choiz-mcp-gateway/facebook:${IMAGE_TAG:-latest}
+    environment:
+      FACEBOOK_ACCESS_TOKEN: ${FACEBOOK_TIMELESS_ACCESS_TOKEN:?set FACEBOOK_TIMELESS_ACCESS_TOKEN in .env}
+      FACEBOOK_PAGE_ID: ${FACEBOOK_TIMELESS_PAGE_ID:?set FACEBOOK_TIMELESS_PAGE_ID in .env}
     restart: unless-stopped

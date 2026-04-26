@@ -7,8 +7,10 @@ const app = express();
 // --- Routing table: path prefix -> upstream MCP URL ---
 // Add a new entry here when you add a new MCP container to compose.yml.
 const upstreams: Record<string, string | undefined> = {
-  "/mcp/warehouse": process.env.UPSTREAM_WAREHOUSE,
-  "/mcp/meta-ads":  process.env.UPSTREAM_META_ADS,
+  "/mcp/warehouse":         process.env.UPSTREAM_WAREHOUSE,
+  "/mcp/meta-ads":          process.env.UPSTREAM_META_ADS,
+  "/mcp/facebook-choiz":    process.env.UPSTREAM_FACEBOOK_CHOIZ,
+  "/mcp/facebook-timeless": process.env.UPSTREAM_FACEBOOK_TIMELESS,
 };
 
 // --- Health check (no auth) ---
