@@ -152,6 +152,8 @@ jobs:
         with:
           role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
           aws-region: ${{ secrets.AWS_REGION }}
+      - name: Checkout (need compose.yml)
+        uses: actions/checkout@v4
       - name: Send deploy command
         id: send
         env:
@@ -160,11 +162,14 @@ jobs:
           GIT_SHA: ${{ github.sha }}
         run: |
           set -euo pipefail
+          # Push compose.yml to EC2 inline (base64) so the EC2 needs no GitHub
+          # credentials. The .env file on EC2 is untouched.
+          COMPOSE_B64=$(base64 -w0 compose.yml)
           CMD_ID=$(aws ssm send-command \
             --instance-ids "$INSTANCE_ID" \
             --document-name "AWS-RunShellScript" \
             --comment "Deploy gateway from ${GIT_SHA:0:7}" \
-            --parameters "commands=[\"set -eu\",\"git config --system --add safe.directory ${REPO_PATH}\",\"cd ${REPO_PATH}\",\"git fetch origin master\",\"git checkout master\",\"git pull --ff-only origin master\",\"docker compose pull\",\"docker compose up -d\",\"docker image prune -f\",\"docker compose ps\"]" \
+            --parameters "commands=[\"set -eu\",\"mkdir -p ${REPO_PATH}\",\"echo ${COMPOSE_B64} | base64 -d > ${REPO_PATH}/compose.yml\",\"cd ${REPO_PATH}\",\"docker compose pull\",\"docker compose up -d\",\"docker image prune -f\",\"docker compose ps\"]" \
             --query 'Command.CommandId' --output text)
           echo "command_id=$CMD_ID" >> "$GITHUB_OUTPUT"
           echo "Sent SSM command $CMD_ID"
