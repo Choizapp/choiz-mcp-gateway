@@ -34,7 +34,9 @@ permissions:
 
 env:
   REGISTRY: ghcr.io
-  IMAGE_PREFIX: ghcr.io/${{ github.repository }}
+  # GHCR requires lowercase. github.repository preserves original case,
+  # so hardcode the lowercased path here.
+  IMAGE_PREFIX: ghcr.io/choizapp/choiz-mcp-gateway
 
 jobs:
   changes:
