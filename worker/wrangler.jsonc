@@ -1,0 +1,27 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "choiz-mcp-worker",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-04-24",
+  "compatibility_flags": ["nodejs_compat"],
+  "observability": {
+    "enabled": true
+  },
+  "upload_source_maps": true,
+  "routes": [
+    {
+      "pattern": "mcp.choiz.com.mx/*",
+      "zone_name": "choiz.com.mx"
+    }
+  ],
+  "vars": {
+    "UPSTREAM_BASE": "https://tunnel.choiz.com.mx",
+    "ALLOWED_EMAIL_DOMAIN": "choiz.com.mx"
+  },
+  "kv_namespaces": [
+    {
+      "binding": "OAUTH_KV",
+      "id": "9f2f4efa91a54ec2ae05aa28c43b27c0"
+    }
+  ]
+}
