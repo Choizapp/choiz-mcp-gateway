@@ -148,9 +148,10 @@ jobs:
   deploy:
     name: Deploy on EC2 via SSM
     needs: [build-gateway, build-warehouse, build-meta-ads]
-    # Run unless any build failed or the workflow was cancelled. Skipped builds
-    # (because their context didn't change) are treated as success.
-    if: ${{ !cancelled() && !failure() }}
+    # Run only if at least one build succeeded. If all three were skipped
+    # (because nothing relevant changed, e.g. workflow-only edit), do not
+    # touch the EC2 — there's nothing to deploy.
+    if: ${{ !cancelled() && !failure() && (needs.build-gateway.result == 'success' || needs.build-warehouse.result == 'success' || needs.build-meta-ads.result == 'success') }}
     runs-on: ubuntu-latest
     steps:
       - name: Configure AWS credentials
