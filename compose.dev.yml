@@ -1,0 +1,20 @@
+# Local development override: build images from source instead of pulling from GHCR.
+#
+# Use:
+#   docker compose -f compose.yml -f compose.dev.yml up --build
+#
+# This is the only way to test image changes locally without going through CI.
+# In production, only compose.yml is used; images come from GHCR.
+
+services:
+  gateway:
+    build: ./gateway
+    image: ghcr.io/choizapp/choiz-mcp-gateway/gateway:dev
+
+  warehouse_mcp:
+    build: ./mcp/warehouse
+    image: ghcr.io/choizapp/choiz-mcp-gateway/warehouse:dev
+
+  meta_ads_mcp:
+    build: ./mcp/meta-ads
+    image: ghcr.io/choizapp/choiz-mcp-gateway/meta-ads:dev

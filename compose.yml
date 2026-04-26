@@ -8,10 +8,14 @@
 #
 # Only the gateway is reachable from cloudflared (127.0.0.1:8080).
 # MCP containers are on an internal Docker network.
+#
+# Images are built and pushed by GitHub Actions (.github/workflows/deploy-gateway.yml)
+# to GHCR. The EC2 only pulls. To rebuild locally for development, override with
+# `docker compose -f compose.yml -f compose.dev.yml up --build`.
 
 services:
   gateway:
-    build: ./gateway
+    image: ghcr.io/choizapp/choiz-mcp-gateway/gateway:${IMAGE_TAG:-latest}
     environment:
       PORT: "8080"
       WORKER_SHARED_SECRET: ${WORKER_SHARED_SECRET:?set WORKER_SHARED_SECRET in .env}
@@ -26,14 +30,14 @@ services:
     restart: unless-stopped
 
   warehouse_mcp:
-    build: ./mcp/warehouse
+    image: ghcr.io/choizapp/choiz-mcp-gateway/warehouse:${IMAGE_TAG:-latest}
     environment:
       DATABASE_URI: ${WAREHOUSE_DATABASE_URL:?set WAREHOUSE_DATABASE_URL in .env}
     restart: unless-stopped
     # No ports: block. Gateway reaches it by service name on the internal network.
 
   meta_ads_mcp:
-    build: ./mcp/meta-ads
+    image: ghcr.io/choizapp/choiz-mcp-gateway/meta-ads:${IMAGE_TAG:-latest}
     environment:
       META_ACCESS_TOKEN: ${META_ACCESS_TOKEN:?set META_ACCESS_TOKEN in .env}
     restart: unless-stopped
