@@ -97,6 +97,40 @@ services:
 
 Do not expose a host port on the MCP container. It is only reachable via the gateway.
 
+### Multi-tenant variant (one image, N containers)
+
+Some MCPs need to serve multiple Choiz tenants (e.g. `facebook-choiz` vs
+`facebook-timeless`, `ga4-choiz` vs `ga4-timeless`). The agreed pattern is
+**one image, N service blocks**, distinguished only by env vars and route
+slug. Worked example from `mcp/facebook/`:
+
+```yaml
+# Same image for both — differ only in env (token + page id).
+facebook_choiz_mcp:
+  image: ghcr.io/choizapp/choiz-mcp-gateway/facebook:${IMAGE_TAG:-latest}
+  environment:
+    FACEBOOK_ACCESS_TOKEN: ${FACEBOOK_CHOIZ_ACCESS_TOKEN:?...}
+    FACEBOOK_PAGE_ID:      ${FACEBOOK_CHOIZ_PAGE_ID:?...}
+  restart: unless-stopped
+
+facebook_timeless_mcp:
+  image: ghcr.io/choizapp/choiz-mcp-gateway/facebook:${IMAGE_TAG:-latest}
+  environment:
+    FACEBOOK_ACCESS_TOKEN: ${FACEBOOK_TIMELESS_ACCESS_TOKEN:?...}
+    FACEBOOK_PAGE_ID:      ${FACEBOOK_TIMELESS_PAGE_ID:?...}
+  restart: unless-stopped
+```
+
+In the gateway block: add **one upstream env per tenant** and one
+`depends_on` entry per tenant. In `gateway/src/index.ts`: add **one route
+per tenant** (`/mcp/<name>-<tenant>/`). In CI: still **one** `build-<name>`
+job — both containers consume the same image. In `.env`: **N copies of
+each secret**, prefixed by tenant (e.g. `FACEBOOK_CHOIZ_*`,
+`FACEBOOK_TIMELESS_*`).
+
+Naming convention: service `<name>_<tenant>_mcp`, slug `/mcp/<name>-<tenant>/`,
+env prefix `<NAME>_<TENANT>_*`.
+
 ## Step 3: register the route in the gateway
 
 Edit `gateway/src/index.ts`:

@@ -5,9 +5,10 @@ Snapshot of where this project is and what's left to do. Update this file whenev
 ## What works today
 
 - Full OAuth flow: Claude.ai ↔ Worker ↔ Google Workspace ↔ `@choiz.com.mx` users.
-- Two MCPs behind the gateway:
+- Three MCPs behind the gateway:
   - **warehouse** (read-only SQL access to the RDS warehouse via `postgres-mcp` wrapped by `supergateway`).
   - **meta-ads** (Choiz fork of `pipeboard-co/meta-ads-mcp`, Node stdio wrapped with `supergateway`). End-to-end verified from claude.ai. Running SHA `6300075` since 2026-04-26 via CI/CD.
+  - **facebook** (Choiz fork of `HagaiHen/facebook-mcp-server`, Python stdio wrapped with `supergateway`). First multi-tenant MCP: one image, two containers (`facebook_choiz_mcp` + `facebook_timeless_mcp`) differing only in `FACEBOOK_ACCESS_TOKEN` + `FACEBOOK_PAGE_ID`. End-to-end verified from claude.ai. Running SHA `affa2b9` since 2026-04-27 via CI/CD.
 - End-to-end verified from Claude.ai: connector shows Connected, tool calls return results.
 - Cloudflare Tunnel + Worker + gateway + MCP container stack is production-shaped (systemd, restart policies, no inbound ports, SSM-only admin).
 - **CI/CD live** (deployed 2026-04-26). GitHub Actions builds ARM64 images → pushes to GHCR → SSM pushes `compose.yml` to EC2 + `docker compose pull && up -d`. EC2 no longer builds anything. See [CICD.md](CICD.md).
@@ -24,8 +25,8 @@ Use [ADDING_AN_MCP.md](ADDING_AN_MCP.md) as the recipe. With CI/CD live, adding 
 Agreed queue (see migration-order memory):
 
 - [x] **meta-ads** — done end-to-end, including the trailing tool-description deploy.
-- [ ] **facebook** (choiz + timeless tenants) — two containers per the multi-tenant pattern.
-- [ ] **instagram** (choiz + timeless).
+- [x] **facebook** (choiz + timeless tenants) — done 2026-04-27. First multi-tenant MCP. Choizapp/choiz-facebook-mcp pinned at `affa2b9`.
+- [ ] **instagram** (choiz + timeless) — repeats the facebook recipe (same multi-tenant pattern, Python stdio, supergateway wrapper).
 - [ ] **ga4** + **gsc** (choiz + timeless each).
 - [ ] **tiktok-ads** (choiz only; ignore tiktok-organic for now).
 - [ ] **google-ads**.
