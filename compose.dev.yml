@@ -18,3 +18,7 @@ services:
   meta_ads_mcp:
     build: ./mcp/meta-ads
     image: ghcr.io/choizapp/choiz-mcp-gateway/meta-ads:dev
+
+  google_ads_mcp:
+    build: ./mcp/google-ads
+    image: ghcr.io/choizapp/choiz-mcp-gateway/google-ads:dev

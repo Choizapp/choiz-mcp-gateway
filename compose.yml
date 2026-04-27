@@ -25,6 +25,7 @@ services:
       UPSTREAM_FACEBOOK_TIMELESS: "http://facebook_timeless_mcp:8080"
       UPSTREAM_INSTAGRAM_CHOIZ: "http://instagram_choiz_mcp:8080"
       UPSTREAM_INSTAGRAM_TIMELESS: "http://instagram_timeless_mcp:8080"
+      UPSTREAM_GOOGLE_ADS: "http://google_ads_mcp:8080"
     ports:
       # Bind only to the host's loopback; cloudflared runs on the same host.
       - "127.0.0.1:8080:8080"
@@ -35,6 +36,7 @@ services:
       - facebook_timeless_mcp
       - instagram_choiz_mcp
       - instagram_timeless_mcp
+      - google_ads_mcp
     restart: unless-stopped
 
   warehouse_mcp:
@@ -89,4 +91,18 @@ services:
       FACEBOOK_APP_ID: ${FACEBOOK_APP_ID:?set FACEBOOK_APP_ID in .env}
       FACEBOOK_APP_SECRET: ${FACEBOOK_APP_SECRET:?set FACEBOOK_APP_SECRET in .env}
       INSTAGRAM_API_VERSION: "v23.0"
+    restart: unless-stopped
+
+  # Google Ads MCP — single tenant (Choiz only). OAuth user creds belong to
+  # hola@choiz.com.mx (the bot user with access to MCC 3916621621). The
+  # developer token is shared across all sub-accounts under that MCC.
+  # No credentials.json mount: the fork (a61ba93) reads OAuth from envs.
+  google_ads_mcp:
+    image: ghcr.io/choizapp/choiz-mcp-gateway/google-ads:${IMAGE_TAG:-latest}
+    environment:
+      GOOGLE_ADS_OAUTH_CLIENT_ID: ${GOOGLE_ADS_OAUTH_CLIENT_ID:?set GOOGLE_ADS_OAUTH_CLIENT_ID in .env}
+      GOOGLE_ADS_OAUTH_CLIENT_SECRET: ${GOOGLE_ADS_OAUTH_CLIENT_SECRET:?set GOOGLE_ADS_OAUTH_CLIENT_SECRET in .env}
+      GOOGLE_ADS_OAUTH_REFRESH_TOKEN: ${GOOGLE_ADS_OAUTH_REFRESH_TOKEN:?set GOOGLE_ADS_OAUTH_REFRESH_TOKEN in .env}
+      GOOGLE_ADS_DEVELOPER_TOKEN: ${GOOGLE_ADS_DEVELOPER_TOKEN:?set GOOGLE_ADS_DEVELOPER_TOKEN in .env}
+      GOOGLE_ADS_LOGIN_CUSTOMER_ID: ${GOOGLE_ADS_LOGIN_CUSTOMER_ID:?set GOOGLE_ADS_LOGIN_CUSTOMER_ID in .env}
     restart: unless-stopped

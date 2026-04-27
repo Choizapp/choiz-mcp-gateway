@@ -13,6 +13,7 @@ const upstreams: Record<string, string | undefined> = {
   "/mcp/facebook-timeless": process.env.UPSTREAM_FACEBOOK_TIMELESS,
   "/mcp/instagram-choiz":    process.env.UPSTREAM_INSTAGRAM_CHOIZ,
   "/mcp/instagram-timeless": process.env.UPSTREAM_INSTAGRAM_TIMELESS,
+  "/mcp/google-ads":        process.env.UPSTREAM_GOOGLE_ADS,
 };
 
 // --- Health check (no auth) ---
