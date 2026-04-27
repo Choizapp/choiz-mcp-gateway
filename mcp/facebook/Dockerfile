@@ -15,7 +15,7 @@
 
 FROM python:3.12-slim
 
-ARG FACEBOOK_MCP_SHA=affa2b9c05b5e53a8327cc1ee5d6cc22437d8471
+ARG FACEBOOK_MCP_SHA=6418c71de0fa0fec69667cb51583e7bbaed52a05
 
 # git: fetch source at build time.
 # nodejs/npm: install supergateway (the stdio <-> Streamable HTTP bridge).
