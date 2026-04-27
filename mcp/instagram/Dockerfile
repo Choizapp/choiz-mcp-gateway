@@ -21,7 +21,7 @@
 
 FROM python:3.12-slim
 
-ARG INSTAGRAM_MCP_SHA=c233cd6696e4b06ac28eea2dc2378d8b046d3e10
+ARG INSTAGRAM_MCP_SHA=1c01c4d3b001b9d3b147f58ef948a2bba11cbdf9
 
 # git: fetch source at build time.
 # nodejs/npm: install supergateway (the stdio <-> Streamable HTTP bridge).
