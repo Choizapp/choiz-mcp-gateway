@@ -14,6 +14,11 @@ Most MCPs you'll find in the wild fall into one of these buckets. Identify yours
 
 If the MCP needs local filesystem access (e.g. filesystem MCP), **do not move it to the gateway** — keep it in `claude_desktop_config.json`. The gateway is for MCPs that talk to network services.
 
+### Known failure modes worth pre-empting
+
+- **Primitive return types in `mcp[cli]` 1.27 (FastMCP)** — a tool annotated `-> int | bool | float` and returning the raw value triggers `outputSchema` auto-generation; claude.ai's validator rejects the result. Patch the fork to annotate `-> str` and wrap the return in `str(...)`. Surfaced on facebook MCP, fix lives in `Choizapp/choiz-facebook-mcp@6418c71`.
+- **Tool-result payload ceiling (~2-3 KB)** — claude.ai (or some hop in Worker→Tunnel→client) rejects streamable-http tool results larger than ~2-3 KB with a generic "Error occurred during tool execution", no server-side trace, while curl-against-the-gateway still returns 200 OK. Fix in the fork: (a) avoid pretty-printed JSON in TextContent (`json.dumps(...)` not `indent=2`); (b) strip query strings from CDN URLs (Facebook/Instagram CDN URLs carry 400-500 chars of signed auth params per asset that expire in hours). Surfaced on instagram MCP, fix lives in `Choizapp/choiz-instagram-mcp@1c01c4d`.
+
 ## Step 1: add a Dockerfile under `mcp/<name>/`
 
 Pick the template that matches the transport.
