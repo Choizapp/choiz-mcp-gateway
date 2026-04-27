@@ -23,6 +23,8 @@ services:
       UPSTREAM_META_ADS: "http://meta_ads_mcp:8080"
       UPSTREAM_FACEBOOK_CHOIZ: "http://facebook_choiz_mcp:8080"
       UPSTREAM_FACEBOOK_TIMELESS: "http://facebook_timeless_mcp:8080"
+      UPSTREAM_INSTAGRAM_CHOIZ: "http://instagram_choiz_mcp:8080"
+      UPSTREAM_INSTAGRAM_TIMELESS: "http://instagram_timeless_mcp:8080"
     ports:
       # Bind only to the host's loopback; cloudflared runs on the same host.
       - "127.0.0.1:8080:8080"
@@ -31,6 +33,8 @@ services:
       - meta_ads_mcp
       - facebook_choiz_mcp
       - facebook_timeless_mcp
+      - instagram_choiz_mcp
+      - instagram_timeless_mcp
     restart: unless-stopped
 
   warehouse_mcp:
@@ -61,4 +65,28 @@ services:
     environment:
       FACEBOOK_ACCESS_TOKEN: ${FACEBOOK_TIMELESS_ACCESS_TOKEN:?set FACEBOOK_TIMELESS_ACCESS_TOKEN in .env}
       FACEBOOK_PAGE_ID: ${FACEBOOK_TIMELESS_PAGE_ID:?set FACEBOOK_TIMELESS_PAGE_ID in .env}
+    restart: unless-stopped
+
+  # Instagram MCP — multi-tenant pattern, mirroring facebook. One image, two
+  # containers; tenants differ in INSTAGRAM_ACCESS_TOKEN + INSTAGRAM_BUSINESS_ACCOUNT_ID.
+  # FACEBOOK_APP_ID / FACEBOOK_APP_SECRET are shared (single Choiz Facebook app).
+  # INSTAGRAM_API_VERSION is pinned literally; bump in lockstep with the fork.
+  instagram_choiz_mcp:
+    image: ghcr.io/choizapp/choiz-mcp-gateway/instagram:${IMAGE_TAG:-latest}
+    environment:
+      INSTAGRAM_ACCESS_TOKEN: ${INSTAGRAM_CHOIZ_ACCESS_TOKEN:?set INSTAGRAM_CHOIZ_ACCESS_TOKEN in .env}
+      INSTAGRAM_BUSINESS_ACCOUNT_ID: ${INSTAGRAM_CHOIZ_BUSINESS_ACCOUNT_ID:?set INSTAGRAM_CHOIZ_BUSINESS_ACCOUNT_ID in .env}
+      FACEBOOK_APP_ID: ${FACEBOOK_APP_ID:?set FACEBOOK_APP_ID in .env}
+      FACEBOOK_APP_SECRET: ${FACEBOOK_APP_SECRET:?set FACEBOOK_APP_SECRET in .env}
+      INSTAGRAM_API_VERSION: "v23.0"
+    restart: unless-stopped
+
+  instagram_timeless_mcp:
+    image: ghcr.io/choizapp/choiz-mcp-gateway/instagram:${IMAGE_TAG:-latest}
+    environment:
+      INSTAGRAM_ACCESS_TOKEN: ${INSTAGRAM_TIMELESS_ACCESS_TOKEN:?set INSTAGRAM_TIMELESS_ACCESS_TOKEN in .env}
+      INSTAGRAM_BUSINESS_ACCOUNT_ID: ${INSTAGRAM_TIMELESS_BUSINESS_ACCOUNT_ID:?set INSTAGRAM_TIMELESS_BUSINESS_ACCOUNT_ID in .env}
+      FACEBOOK_APP_ID: ${FACEBOOK_APP_ID:?set FACEBOOK_APP_ID in .env}
+      FACEBOOK_APP_SECRET: ${FACEBOOK_APP_SECRET:?set FACEBOOK_APP_SECRET in .env}
+      INSTAGRAM_API_VERSION: "v23.0"
     restart: unless-stopped
