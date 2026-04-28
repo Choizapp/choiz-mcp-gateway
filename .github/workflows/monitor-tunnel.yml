@@ -1,0 +1,102 @@
+name: Monitor tunnel health
+
+# Cron-based self-heal for the cloudflared tunnel. Runs every 5 minutes:
+#   1. Curl https://tunnel.choiz.com.mx/healthz from a GHA runner.
+#   2. If 200 -> nothing to do, job ends.
+#   3. If non-200 -> SSM restart cloudflared on the EC2.
+#   4. Re-probe 15s later.
+#   5. If still non-200 -> open a GitHub issue (sends email notification).
+#
+# The 5-min minimum granularity is the GHA cron limit. In practice runs
+# may be a couple of minutes late; that's fine for our SLO.
+#
+# Repo is public so Actions minutes are unlimited and free.
+
+on:
+  schedule:
+    - cron: '*/5 * * * *'
+  workflow_dispatch:
+
+permissions:
+  id-token: write     # OIDC for AWS role
+  contents: read
+  issues: write       # to open ops issues
+
+concurrency:
+  # Don't pile up runs; if one is mid-restart, skip starting another.
+  group: monitor-tunnel
+  cancel-in-progress: false
+
+jobs:
+  check:
+    name: Probe + self-heal
+    runs-on: ubuntu-latest
+    steps:
+      - name: Probe tunnel
+        id: probe
+        run: |
+          status=$(curl -s -o /dev/null -w "%{http_code}" -m 10 https://tunnel.choiz.com.mx/healthz || echo "000")
+          echo "status=$status" >> "$GITHUB_OUTPUT"
+          echo "Tunnel HTTP $status at $(date -u +%H:%M:%SZ)"
+
+      - name: Configure AWS credentials
+        if: steps.probe.outputs.status != '200'
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ secrets.AWS_REGION }}
+
+      - name: Restart cloudflared via SSM
+        if: steps.probe.outputs.status != '200'
+        id: restart
+        env:
+          INSTANCE_ID: ${{ secrets.EC2_INSTANCE_ID }}
+        run: |
+          set -euo pipefail
+          echo "Tunnel returned non-200, attempting auto-restart of cloudflared"
+          CMD_ID=$(aws ssm send-command \
+            --instance-ids "$INSTANCE_ID" \
+            --document-name "AWS-RunShellScript" \
+            --comment "tunnel-monitor auto-restart" \
+            --timeout-seconds 60 \
+            --parameters 'commands=["sudo systemctl restart cloudflared && sleep 6 && sudo systemctl is-active cloudflared"]' \
+            --query 'Command.CommandId' --output text)
+          echo "SSM CommandId: $CMD_ID"
+          STATUS=Pending
+          for _ in $(seq 1 24); do
+            STATUS=$(aws ssm get-command-invocation --command-id "$CMD_ID" --instance-id "$INSTANCE_ID" --query 'Status' --output text 2>/dev/null || echo "Pending")
+            case "$STATUS" in
+              Success|Failed|Cancelled|TimedOut) break ;;
+            esac
+            sleep 5
+          done
+          echo "SSM final status: $STATUS"
+          # Tolerate Failed here (instance may be totally hung). The re-probe step
+          # decides whether the tunnel actually recovered.
+
+      - name: Re-probe tunnel
+        if: steps.probe.outputs.status != '200'
+        id: reprobe
+        run: |
+          sleep 15
+          status=$(curl -s -o /dev/null -w "%{http_code}" -m 10 https://tunnel.choiz.com.mx/healthz || echo "000")
+          echo "status=$status" >> "$GITHUB_OUTPUT"
+          echo "Re-probe HTTP $status at $(date -u +%H:%M:%SZ)"
+          [ "$status" = "200" ] && echo "Tunnel recovered after restart" || echo "Tunnel STILL unhealthy after restart"
+
+      - name: Open issue on persistent failure
+        if: steps.probe.outputs.status != '200' && (steps.reprobe.outputs.status != '200' || steps.reprobe.outputs.status == '')
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh issue create \
+            --repo ${{ github.repository }} \
+            --title "[ops] Tunnel persistently unhealthy at $(date -u +%H:%MZ)" \
+            --body "Auto-monitor detected that the Cloudflare Tunnel was unhealthy and the auto-restart did not bring it back.
+
+          - First probe: HTTP ${{ steps.probe.outputs.status }}
+          - Re-probe after restart: HTTP ${{ steps.reprobe.outputs.status }}
+          - Run: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
+
+          Likely the EC2 OS itself is hung (SSM not responding) and a manual reboot from the EC2 Console is required." \
+            --label "ops"
