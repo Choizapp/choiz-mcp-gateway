@@ -5,11 +5,12 @@ Snapshot of where this project is and what's left to do. Update this file whenev
 ## What works today
 
 - Full OAuth flow: Claude.ai ↔ Worker ↔ Google Workspace ↔ `@choiz.com.mx` users.
-- Four MCPs behind the gateway:
+- Four MCPs behind the gateway (google-ads disabled — see below):
   - **warehouse** (read-only SQL access to the RDS warehouse via `postgres-mcp` wrapped by `supergateway`).
   - **meta-ads** (Choiz fork of `pipeboard-co/meta-ads-mcp`, Node stdio wrapped with `supergateway`). End-to-end verified from claude.ai. Running SHA `6300075` since 2026-04-26 via CI/CD.
   - **facebook** (Choiz fork of `HagaiHen/facebook-mcp-server`, Python stdio wrapped with `supergateway`). First multi-tenant MCP: one image, two containers (`facebook_choiz_mcp` + `facebook_timeless_mcp`) differing only in `FACEBOOK_ACCESS_TOKEN` + `FACEBOOK_PAGE_ID`. End-to-end verified from claude.ai. Running SHA `6418c71` since 2026-04-27 via CI/CD.
   - **instagram** (Choiz fork of `jlbadano/ig-mcp`, Python stdio wrapped with `supergateway`). Multi-tenant: `instagram_choiz_mcp` + `instagram_timeless_mcp`, sharing `FACEBOOK_APP_ID/SECRET`. End-to-end verified from claude.ai. Running SHA `1c01c4d` since 2026-04-27 via CI/CD.
+  - **google-ads** — DISABLED 2026-04-28. The container backend works (smoke-tested via curl on EC2; fork pinned at `6fefe68` returns valid responses under 2 KB). The blocker is at the network layer: any claude.ai interaction with this MCP triggers a cloudflared tunnel zombie within seconds, which takes down all the other MCPs. Empirically reproduced on 2026-04-28: stack stable as long as google-ads is not invoked, breaks within ~10 s of the first claude.ai call. Image, env vars, and Dockerfile retained; service block in compose.yml is commented out pending a stateful supergateway migration or relocation to a separate host. See `project_google_ads_destabilizes_host_CONFIRMED` memory and the comment block in compose.yml.
 - End-to-end verified from Claude.ai: connector shows Connected, tool calls return results.
 - Cloudflare Tunnel + Worker + gateway + MCP container stack is production-shaped (systemd, restart policies, no inbound ports, SSM-only admin).
 - **CI/CD live** (deployed 2026-04-26). GitHub Actions builds ARM64 images → pushes to GHCR → SSM pushes `compose.yml` to EC2 + `docker compose pull && up -d`. EC2 no longer builds anything. See [CICD.md](CICD.md).
@@ -28,7 +29,7 @@ Agreed queue (see migration-order memory):
 - [x] **meta-ads** — done end-to-end, including the trailing tool-description deploy.
 - [x] **facebook** (choiz + timeless tenants) — done 2026-04-27. First multi-tenant MCP. Choizapp/choiz-facebook-mcp pinned at `6418c71`.
 - [x] **instagram** (choiz + timeless) — done 2026-04-27. Choizapp/choiz-instagram-mcp pinned at `1c01c4d`. Surfaced a new failure mode: claude.ai rejects streamable-http tool results above ~2-3 KB ("Error occurred during tool execution" with no server-side trace). Fix shipped in the fork: strip CDN URL query strings + compact JSON.
-- [ ] **google-ads** ← next.
+- [~] **google-ads** — backend ready (fork `6fefe68`), DISABLED in production 2026-04-28. Triggers a cloudflared tunnel zombie within seconds of any claude.ai call, taking down the rest of the stack. Backend smoke-test via curl on EC2 returns clean <2 KB responses with real data; the failure is at the network layer between this container and the gateway tunnel. Re-enable requires either switching supergateway to stateful mode or moving the container to a separate host. See `project_google_ads_destabilizes_host_CONFIRMED` memory.
 - [ ] **ga4** + **gsc** (choiz + timeless each).
 - [ ] **kapso** + **posthog** — already remote, but wrap through gateway to hide keys / brand as official.
 - [ ] **tiktok-ads** (choiz only; ignore tiktok-organic for now).
@@ -50,6 +51,35 @@ Once at least 3-4 useful MCPs are on the gateway:
   - What each connector does and what data it can see.
 - Pilot with 2-3 early adopters from the data team for a week.
 - Open rollout to the 15 people on Team plan.
+
+### 2.5. Pre-GA4 structural hardening (decide before continuing the queue)
+
+The google-ads migration on 2026-04-28 surfaced three patterns that will
+recur on GA4, posthog, kapso, and tiktok-ads. Patching each fork ad-hoc
+doesn't scale. Open before resuming the queue:
+
+- **(A) Response shrinker in the gateway / Worker**. A generic layer that
+  intercepts MCP tool results and truncates / paginates anything over
+  ~2 KB before it reaches claude.ai. Removes the per-fork "compact format"
+  patch loop entirely. ~1 day of work. Highest-leverage of the three.
+- **(B) Replace `supergateway --stateless` with stateful or with native
+  FastMCP HTTP transport**. The stateless mode respawns the python child
+  per request, which negates module-level caches (e.g. `GoogleAdsClient`)
+  and drives ~50-90 MB of RSS growth per call. Affects every Python MCP
+  with non-trivial imports. ~half a day per MCP, validated case by case.
+- **(C) EC2 disk 8 GB → 30 GB + auto-prune dangling images in CI**. The
+  google-ads deploy hit 87% disk and an ipc-timeout on `compose pull`
+  because the pre-existing `:latest` images held by old containers don't
+  prune until `compose up -d` recreates them. Brittle. Cheap operational
+  fix; should be done before GA4 + Kapso land.
+
+Recommended order: **(C) → (A) → (B)**. (C) is operational/cheap; (A) is
+the highest-leverage technical change; (B) is the deepest but only worth
+it after (A) has reduced the urgency of payload bloat in individual forks.
+
+A pre-deploy checklist also belongs in `ADDING_AN_MCP.md`: measure each
+tool's worst-case payload in CI and assert <2 KB; set `mem_limit` +
+`pids_limit` per service from day one.
 
 ### 3. Nice-to-have hardening
 
