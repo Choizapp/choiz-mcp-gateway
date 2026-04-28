@@ -105,4 +105,11 @@ services:
       GOOGLE_ADS_OAUTH_REFRESH_TOKEN: ${GOOGLE_ADS_OAUTH_REFRESH_TOKEN:?set GOOGLE_ADS_OAUTH_REFRESH_TOKEN in .env}
       GOOGLE_ADS_DEVELOPER_TOKEN: ${GOOGLE_ADS_DEVELOPER_TOKEN:?set GOOGLE_ADS_DEVELOPER_TOKEN in .env}
       GOOGLE_ADS_LOGIN_CUSTOMER_ID: ${GOOGLE_ADS_LOGIN_CUSTOMER_ID:?set GOOGLE_ADS_LOGIN_CUSTOMER_ID in .env}
+    # Safety net: if the container ever blows up (gRPC channel storm, fd leak,
+    # subprocess accumulation under supergateway), keep it contained to itself
+    # and let `restart: unless-stopped` recover it. Host stays unaffected.
+    # Cap chosen to leave headroom on the t4g.small (2 GB RAM); google-ads is
+    # idle <100 MB. Revisit if smoke-test peaks approach the limit.
+    mem_limit: 400m
+    pids_limit: 100
     restart: unless-stopped
