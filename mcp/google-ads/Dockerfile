@@ -8,12 +8,20 @@
 #      drop indent=2 + lower hardcoded LIMITs to fit the claude.ai 2-3 KB
 #      streamable-http payload ceiling, and read OAuth credentials from env
 #      vars (so containers don't need a credentials.json file mount).
-#   3. c626ea4 — cache GoogleAdsClient at module level (fixes ~50-90 MB/call
-#      RSS growth surfaced on the gateway) + flip default output format
-#      from 'table' to 'csv' on get_campaign_performance/get_ad_performance/
-#      list_resources/get_asset_usage so multi-row results stay under the
-#      2-3 KB ceiling. Default LIMIT 25 -> 10 on the perf wrappers, exposed
-#      as a 'limit' parameter for callers that tolerate larger payloads.
+#   3. c626ea4 — cache GoogleAdsClient at module level (no-op under the
+#      current `supergateway --stateless` mode which respawns the python
+#      child per request, but harmless and useful if we ever switch to
+#      stateful) + flip default output format from 'table' to 'csv' on
+#      get_campaign_performance/get_ad_performance/list_resources/
+#      get_asset_usage so multi-row results stay under the 2-3 KB ceiling.
+#      Default LIMIT 25 -> 10 on the perf wrappers, exposed as a 'limit'
+#      parameter for callers that tolerate larger payloads.
+#   4. 6fefe68 — trim run_gaql output to fields named in the SELECT clause.
+#      proto_to_dict + including_default_value_fields=True was emitting ~80
+#      proto fields per row even when SELECT named only 8, leaving ~5.9 KB
+#      single-row outputs well over the 2-3 KB ceiling. Now we parse the
+#      SELECT and filter the flattened row to those keys; default flag
+#      stays True so zeros in requested metrics still appear.
 #
 # Stack: Python; google_ads_server.py uses FastMCP and calls mcp.run(transport=
 # "stdio") in its __main__ block. So we launch via `python google_ads_server.py`
@@ -31,7 +39,7 @@
 
 FROM python:3.12-slim
 
-ARG GOOGLE_ADS_MCP_SHA=c626ea451eab6524d57c84667efa5904085d5579
+ARG GOOGLE_ADS_MCP_SHA=6fefe681cdf2f131d13b505ccbf7d239afd6f9b3
 
 # git: fetch source at build time.
 # nodejs/npm: install supergateway (the stdio <-> Streamable HTTP bridge).
