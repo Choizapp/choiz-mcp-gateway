@@ -1,13 +1,19 @@
 # Google Ads MCP (campaigns, ad groups, GAQL queries, image-asset analytics).
 #
 # Source: https://github.com/Choizapp/choiz-google-ads-mcp (Choiz fork of
-# cohnen/mcp-google-ads). Carries two patches on top of upstream:
+# cohnen/mcp-google-ads). Carries three patches on top of upstream:
 #   1. 9d27ca9 — migrate from REST (which returns 500s) to the gRPC google-ads
 #      client library.
 #   2. a61ba93 — gateway-prep: pin gRPC deps in requirements.txt + pyproject.toml,
 #      drop indent=2 + lower hardcoded LIMITs to fit the claude.ai 2-3 KB
 #      streamable-http payload ceiling, and read OAuth credentials from env
 #      vars (so containers don't need a credentials.json file mount).
+#   3. c626ea4 — cache GoogleAdsClient at module level (fixes ~50-90 MB/call
+#      RSS growth surfaced on the gateway) + flip default output format
+#      from 'table' to 'csv' on get_campaign_performance/get_ad_performance/
+#      list_resources/get_asset_usage so multi-row results stay under the
+#      2-3 KB ceiling. Default LIMIT 25 -> 10 on the perf wrappers, exposed
+#      as a 'limit' parameter for callers that tolerate larger payloads.
 #
 # Stack: Python; google_ads_server.py uses FastMCP and calls mcp.run(transport=
 # "stdio") in its __main__ block. So we launch via `python google_ads_server.py`
@@ -25,7 +31,7 @@
 
 FROM python:3.12-slim
 
-ARG GOOGLE_ADS_MCP_SHA=a61ba938d3a8110879202693bb312a248a3e763a
+ARG GOOGLE_ADS_MCP_SHA=c626ea451eab6524d57c84667efa5904085d5579
 
 # git: fetch source at build time.
 # nodejs/npm: install supergateway (the stdio <-> Streamable HTTP bridge).

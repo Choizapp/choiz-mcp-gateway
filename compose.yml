@@ -108,8 +108,11 @@ services:
     # Safety net: if the container ever blows up (gRPC channel storm, fd leak,
     # subprocess accumulation under supergateway), keep it contained to itself
     # and let `restart: unless-stopped` recover it. Host stays unaffected.
-    # Cap chosen to leave headroom on the t4g.small (2 GB RAM); google-ads is
-    # idle <100 MB. Revisit if smoke-test peaks approach the limit.
-    mem_limit: 400m
+    # 800 MB cap: with the cached GoogleAdsClient (fork c626ea4) per-call RSS
+    # growth is flat after warm-up, so this is mostly belt-and-suspenders.
+    # 400 MB was the initial cap and turned out to be too tight when bursts
+    # of MCP calls hit the pre-cache fork; bumped after smoke-testing on
+    # 2026-04-28. Idle footprint is <100 MB on a t4g.small (2 GB RAM).
+    mem_limit: 800m
     pids_limit: 100
     restart: unless-stopped
