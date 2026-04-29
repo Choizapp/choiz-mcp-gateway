@@ -30,3 +30,11 @@ services:
   ga4_timeless_mcp:
     build: ./mcp/ga4
     image: ghcr.io/choizapp/choiz-mcp-gateway/ga4:dev
+
+  gsc_choiz_mcp:
+    build: ./mcp/gsc
+    image: ghcr.io/choizapp/choiz-mcp-gateway/gsc:dev
+
+  gsc_timeless_mcp:
+    build: ./mcp/gsc
+    image: ghcr.io/choizapp/choiz-mcp-gateway/gsc:dev

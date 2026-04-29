@@ -27,6 +27,8 @@ services:
       UPSTREAM_INSTAGRAM_TIMELESS: "http://instagram_timeless_mcp:8080"
       UPSTREAM_GA4_CHOIZ: "http://ga4_choiz_mcp:8080"
       UPSTREAM_GA4_TIMELESS: "http://ga4_timeless_mcp:8080"
+      UPSTREAM_GSC_CHOIZ: "http://gsc_choiz_mcp:8080"
+      UPSTREAM_GSC_TIMELESS: "http://gsc_timeless_mcp:8080"
       # UPSTREAM_GOOGLE_ADS disabled 2026-04-28: this MCP destabilizes the
       # cloudflared tunnel. Empirically confirmed by user — any claude.ai
       # interaction with the google-ads container caused tunnel zombie within
@@ -49,6 +51,8 @@ services:
       - instagram_timeless_mcp
       - ga4_choiz_mcp
       - ga4_timeless_mcp
+      - gsc_choiz_mcp
+      - gsc_timeless_mcp
       # - google_ads_mcp  # disabled — see UPSTREAM_GOOGLE_ADS comment above
     restart: unless-stopped
 
@@ -137,6 +141,31 @@ services:
       GA4_SERVICE_ACCOUNT_JSON_B64: ${GA4_SERVICE_ACCOUNT_JSON_B64:?set GA4_SERVICE_ACCOUNT_JSON_B64 in .env}
       GA4_PROPERTY_ID: ${GA4_TIMELESS_PROPERTY_ID:?set GA4_TIMELESS_PROPERTY_ID in .env}
     mem_limit: 800m
+    pids_limit: 100
+    restart: unless-stopped
+
+  # GSC MCP — multi-tenant, mirrors ga4 except: no per-tenant env (the
+  # public mcp-server-gsc package has no site-filter env var). Two
+  # services exist purely to expose two slugs in claude.ai
+  # (/mcp/gsc-choiz vs /mcp/gsc-timeless); the model picks the right
+  # `siteUrl` per-tool-call based on the connector slug. Both services
+  # use the SAME service-account JSON as GA4 (single Choiz reader account
+  # with access to both Choiz + Timeless GSC sites). The compose-level
+  # rename surfaces it as GSC_SERVICE_ACCOUNT_JSON_B64 inside the
+  # container so the GSC entrypoint doesn't read a "GA4_*" name.
+  gsc_choiz_mcp:
+    image: ghcr.io/choizapp/choiz-mcp-gateway/gsc:${IMAGE_TAG:-latest}
+    environment:
+      GSC_SERVICE_ACCOUNT_JSON_B64: ${GA4_SERVICE_ACCOUNT_JSON_B64:?set GA4_SERVICE_ACCOUNT_JSON_B64 in .env}
+    mem_limit: 500m
+    pids_limit: 100
+    restart: unless-stopped
+
+  gsc_timeless_mcp:
+    image: ghcr.io/choizapp/choiz-mcp-gateway/gsc:${IMAGE_TAG:-latest}
+    environment:
+      GSC_SERVICE_ACCOUNT_JSON_B64: ${GA4_SERVICE_ACCOUNT_JSON_B64:?set GA4_SERVICE_ACCOUNT_JSON_B64 in .env}
+    mem_limit: 500m
     pids_limit: 100
     restart: unless-stopped
 
