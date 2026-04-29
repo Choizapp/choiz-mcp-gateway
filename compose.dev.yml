@@ -22,3 +22,11 @@ services:
   google_ads_mcp:
     build: ./mcp/google-ads
     image: ghcr.io/choizapp/choiz-mcp-gateway/google-ads:dev
+
+  ga4_choiz_mcp:
+    build: ./mcp/ga4
+    image: ghcr.io/choizapp/choiz-mcp-gateway/ga4:dev
+
+  ga4_timeless_mcp:
+    build: ./mcp/ga4
+    image: ghcr.io/choizapp/choiz-mcp-gateway/ga4:dev

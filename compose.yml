@@ -25,6 +25,8 @@ services:
       UPSTREAM_FACEBOOK_TIMELESS: "http://facebook_timeless_mcp:8080"
       UPSTREAM_INSTAGRAM_CHOIZ: "http://instagram_choiz_mcp:8080"
       UPSTREAM_INSTAGRAM_TIMELESS: "http://instagram_timeless_mcp:8080"
+      UPSTREAM_GA4_CHOIZ: "http://ga4_choiz_mcp:8080"
+      UPSTREAM_GA4_TIMELESS: "http://ga4_timeless_mcp:8080"
       # UPSTREAM_GOOGLE_ADS disabled 2026-04-28: this MCP destabilizes the
       # cloudflared tunnel. Empirically confirmed by user — any claude.ai
       # interaction with the google-ads container caused tunnel zombie within
@@ -45,6 +47,8 @@ services:
       - facebook_timeless_mcp
       - instagram_choiz_mcp
       - instagram_timeless_mcp
+      - ga4_choiz_mcp
+      - ga4_timeless_mcp
       # - google_ads_mcp  # disabled — see UPSTREAM_GOOGLE_ADS comment above
     restart: unless-stopped
 
@@ -100,6 +104,40 @@ services:
       FACEBOOK_APP_ID: ${FACEBOOK_APP_ID:?set FACEBOOK_APP_ID in .env}
       FACEBOOK_APP_SECRET: ${FACEBOOK_APP_SECRET:?set FACEBOOK_APP_SECRET in .env}
       INSTAGRAM_API_VERSION: "v23.0"
+    restart: unless-stopped
+
+  # GA4 MCP — multi-tenant pattern, mirroring facebook/instagram. One
+  # image, two containers, distinguished only by GA4_PROPERTY_ID. The
+  # service-account JSON (GA4_SERVICE_ACCOUNT_JSON_B64) is shared between
+  # tenants (single Choiz reader account).
+  #
+  # Wraps the choiz-ga4-mcp Python server with `supergateway --stateful`.
+  # Stateful is mandatory here: this MCP wraps the google-analytics-data
+  # gRPC SDK, which is the same family that destabilized the cloudflared
+  # tunnel under google-ads on 2026-04-28 when run under default stateless
+  # mode. Stateful keeps one warm gRPC client per session instead of
+  # respawning the python child per request.
+  #
+  # mem_limit + pids_limit retained as defense-in-depth against open bugs
+  # in supergateway stateful mode (#124 child-process leak, #126
+  # SIGTERM-on-reconnect). If a leak appears, the container OOMs cleanly
+  # and restarts.
+  ga4_choiz_mcp:
+    image: ghcr.io/choizapp/choiz-mcp-gateway/ga4:${IMAGE_TAG:-latest}
+    environment:
+      GA4_SERVICE_ACCOUNT_JSON_B64: ${GA4_SERVICE_ACCOUNT_JSON_B64:?set GA4_SERVICE_ACCOUNT_JSON_B64 in .env}
+      GA4_PROPERTY_ID: ${GA4_CHOIZ_PROPERTY_ID:?set GA4_CHOIZ_PROPERTY_ID in .env}
+    mem_limit: 800m
+    pids_limit: 100
+    restart: unless-stopped
+
+  ga4_timeless_mcp:
+    image: ghcr.io/choizapp/choiz-mcp-gateway/ga4:${IMAGE_TAG:-latest}
+    environment:
+      GA4_SERVICE_ACCOUNT_JSON_B64: ${GA4_SERVICE_ACCOUNT_JSON_B64:?set GA4_SERVICE_ACCOUNT_JSON_B64 in .env}
+      GA4_PROPERTY_ID: ${GA4_TIMELESS_PROPERTY_ID:?set GA4_TIMELESS_PROPERTY_ID in .env}
+    mem_limit: 800m
+    pids_limit: 100
     restart: unless-stopped
 
   # Google Ads MCP — DISABLED 2026-04-28. Empirically confirmed that any
