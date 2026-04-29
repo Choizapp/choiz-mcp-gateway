@@ -29,6 +29,11 @@ services:
       UPSTREAM_GA4_TIMELESS: "http://ga4_timeless_mcp:8080"
       UPSTREAM_GSC_CHOIZ: "http://gsc_choiz_mcp:8080"
       UPSTREAM_GSC_TIMELESS: "http://gsc_timeless_mcp:8080"
+      # Remote MCPs proxied through the gateway (no internal container).
+      # The route is only registered if the corresponding API key is set;
+      # gateway/src/index.ts logs a skip-warning otherwise. See memory
+      # project_wrap_remote_mcps + the remoteUpstreams table in index.ts.
+      KAPSO_API_KEY: ${KAPSO_API_KEY:-}
       # UPSTREAM_GOOGLE_ADS disabled 2026-04-28: this MCP destabilizes the
       # cloudflared tunnel. Empirically confirmed by user — any claude.ai
       # interaction with the google-ads container caused tunnel zombie within
