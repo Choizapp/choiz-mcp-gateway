@@ -73,17 +73,10 @@ EXPOSE 8080
 # it as Streamable HTTP on :8080.
 # --streamableHttpPath / matters: the gateway strips /mcp/<name> before
 # forwarding, so the upstream must serve at /.
-# --stateful (added 2026-04-29) keeps a single Python child alive per MCP
-# session (tracked via mcp-session-id header). Default stateless mode
-# respawned the child per request, importing the heavy google-ads gRPC
-# stack each time and opening a storm of outbound channels to
-# googleads.googleapis.com — empirically this destabilized the cloudflared
-# tunnel on 2026-04-28. With stateful, one warm gRPC client per session.
 ENTRYPOINT ["supergateway"]
 CMD [ \
   "--stdio", "python /app/google_ads_server.py", \
   "--outputTransport", "streamableHttp", \
   "--port", "8080", \
-  "--streamableHttpPath", "/", \
-  "--stateful" \
+  "--streamableHttpPath", "/" \
 ]
