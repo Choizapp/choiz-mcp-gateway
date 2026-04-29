@@ -10,9 +10,49 @@ Most MCPs you'll find in the wild fall into one of these buckets. Identify yours
 |---|---|---|
 | **stdio** (most common; runs as CLI subprocess) | Yes, `--stdio "<command>" --outputTransport streamableHttp` | `@modelcontextprotocol/server-*`, `mcp-server-git`, most community MCPs |
 | **SSE** (HTTP server, two endpoints: `/sse` + `/messages`) | No. `supergateway` does NOT translate `sse -> streamableHttp`. Either (a) find a stdio version of the same MCP, or (b) run two containers: the SSE server + a small adapter you write yourself. | `crystaldba/postgres-mcp --transport=sse` (legacy) |
-| **Streamable HTTP** (HTTP server, single endpoint) | No. Run it directly. | Newer MCPs following the 2025-03-26 spec |
+| **Streamable HTTP, self-hosted** (we run it) | No. Run it directly in a container. | Newer MCPs following the 2025-03-26 spec, run from a fork |
+| **Streamable HTTP, vendor-hosted** (vendor runs it; we proxy) | No container at all. Add an entry to `remoteUpstreams` in `gateway/src/index.ts`. See **Remote-proxy MCPs** below. | `kapso` (`https://app.kapso.ai/mcp`) |
 
 If the MCP needs local filesystem access (e.g. filesystem MCP), **do not move it to the gateway** — keep it in `claude_desktop_config.json`. The gateway is for MCPs that talk to network services.
+
+### Remote-proxy MCPs (vendor-hosted Streamable HTTP)
+
+When the vendor already runs a Streamable HTTP MCP (e.g. kapso), we
+wrap it through the gateway to hide the upstream API key from
+claude.ai and brand the URL under `mcp.choiz.com.mx`. **No Dockerfile,
+no compose service, no CI build job** — only changes are in
+`gateway/src/index.ts`, `compose.yml` (env block), and `.env`.
+
+Recipe:
+
+1. Add an entry to `remoteUpstreams` in `gateway/src/index.ts`:
+   ```ts
+   "/mcp/<name>": {
+     target: "https://vendor.example.com/mcp",
+     apiKeyEnv: "<NAME>_API_KEY",
+     apiKeyHeader: "x-api-key",  // or "authorization", check vendor docs
+   },
+   ```
+2. Add `<NAME>_API_KEY: ${<NAME>_API_KEY:-}` to the gateway service's
+   `environment:` block in `compose.yml`. Use the **`:-` default-empty**
+   pattern, not `:?` fail-fast — the gateway already logs a "skipping
+   remote" warning if the key is missing, and a single missed config
+   shouldn't take down the whole stack.
+3. Document `<NAME>_API_KEY` in `.env.example` and append the real
+   value to the EC2 `.env`.
+4. Smoke from EC2:
+   - **Pre-flight**: `curl https://vendor.example.com/mcp` directly
+     with the API key. Confirms the vendor + key work before bringing
+     the gateway into the picture.
+   - **Through gateway**: `curl http://localhost:8080/mcp/<name>/`
+     with `x-worker-shared-secret` + `x-choiz-user-email`. Confirms
+     header injection + auth chain.
+5. The gateway's `proxyReq` hook automatically strips
+   `x-worker-shared-secret`, `x-choiz-user-email`, and `x-mcp-user`
+   on outgoing requests, so no Choiz internal headers leak upstream.
+
+See `project_remote_proxy_pattern` and `project_kapso_deployed_state`
+memories for the worked example.
 
 ### Known failure modes worth pre-empting
 

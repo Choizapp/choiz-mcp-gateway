@@ -5,12 +5,13 @@ Snapshot of where this project is and what's left to do. Update this file whenev
 ## What works today
 
 - Full OAuth flow: Claude.ai ↔ Worker ↔ Google Workspace ↔ `@choiz.com.mx` users.
-- Six MCPs behind the gateway (google-ads disabled and DROPPED from queue — see below):
+- Seven MCPs behind the gateway (google-ads disabled and DROPPED from queue — see below):
   - **warehouse** (read-only SQL access to the RDS warehouse via `postgres-mcp` wrapped by `supergateway`).
   - **meta-ads** (Choiz fork of `pipeboard-co/meta-ads-mcp`, Node stdio wrapped with `supergateway`). End-to-end verified from claude.ai. Running SHA `6300075` since 2026-04-26 via CI/CD.
   - **facebook** (Choiz fork of `HagaiHen/facebook-mcp-server`, Python stdio wrapped with `supergateway`). First multi-tenant MCP: one image, two containers (`facebook_choiz_mcp` + `facebook_timeless_mcp`) differing only in `FACEBOOK_ACCESS_TOKEN` + `FACEBOOK_PAGE_ID`. End-to-end verified from claude.ai. Running SHA `6418c71` since 2026-04-27 via CI/CD.
   - **instagram** (Choiz fork of `jlbadano/ig-mcp`, Python stdio wrapped with `supergateway`). Multi-tenant: `instagram_choiz_mcp` + `instagram_timeless_mcp`, sharing `FACEBOOK_APP_ID/SECRET`. End-to-end verified from claude.ai. Running SHA `1c01c4d` since 2026-04-27 via CI/CD.
   - **ga4** (Choiz fork at `Choizapp/choiz-ga4-mcp@a0278ff`, FastMCP wrapper around `google-analytics-data v1beta`). Multi-tenant: `ga4_choiz_mcp` (property 337268679) + `ga4_timeless_mcp` (property 507460155), sharing `GA4_SERVICE_ACCOUNT_JSON_B64` (b64 of the reader service-account, decoded by container entrypoint). First MCP with service-account-JSON injection via env. End-to-end verified from claude.ai 2026-04-29. Stateless supergateway after `--stateful` was tried and tripped issue #126. See `project_ga4_deployed_state` and `project_supergateway_stateful_bug126`.
+  - **kapso** (remote-proxy) — first MCP wrapped without a container. Gateway proxies `mcp.choiz.com.mx/mcp/kapso/` → `https://app.kapso.ai/mcp` and injects `x-api-key` per-request. claude.ai never sees the key. End-to-end smoke from EC2 (initialize + tools/list + project_info call) passed 2026-04-29 late. Pattern documented in `project_remote_proxy_pattern` memory + the `remoteUpstreams` table in `gateway/src/index.ts`.
   - **google-ads** — DISABLED 2026-04-28 + DROPPED FROM QUEUE 2026-04-29. The container backend works (smoke-tested via curl on EC2; fork pinned at `6fefe68` returns valid responses under 2 KB). Two compounding blockers: (a) under `--stateless`, gRPC connection storm destabilizes the cloudflared tunnel; (b) under `--stateful`, supergateway issue #126 SIGTERMs the child after the first call. Re-enabling requires a deeper fix (native FastMCP HTTP transport, separate host, or a different transport entirely). Image, env vars, and Dockerfile retained for if/when that work happens.
 
 ### Operational hardening shipped 2026-04-29
@@ -37,10 +38,13 @@ Agreed queue (see migration-order memory):
 - [x] **instagram** (choiz + timeless) — done 2026-04-27. Choizapp/choiz-instagram-mcp pinned at `1c01c4d`. Surfaced a new failure mode: claude.ai rejects streamable-http tool results above ~2-3 KB ("Error occurred during tool execution" with no server-side trace). Fix shipped in the fork: strip CDN URL query strings + compact JSON.
 - [~] **google-ads** — DROPPED from the queue 2026-04-29. Backend kept (fork `6fefe68`, image in GHCR, env vars in `.env`) but service stays commented in `compose.yml`. Re-enable requires a transport rethink (native FastMCP HTTP, separate host, etc.) — out of scope for this migration pass.
 - [x] **ga4** (choiz + timeless) — done 2026-04-29. Choizapp/choiz-ga4-mcp pinned at `a0278ff`. First MCP with service-account JSON injection via env (b64 + custom entrypoint). Surfaced two new failure modes: supergateway `--stateful` trips bug #126 under claude.ai, AND default FastMCP indent=2 + permissive limits bust the payload ceiling. Both fixed in fork (compact JSON, lower default limit, slim schema tools) and Dockerfile (drop `--stateful`).
-- [ ] **gsc** (choiz + timeless) — next. Local config uses public package `mcp-server-gsc` via `npx` with the SAME service-account JSON as GA4. Reuse `GA4_SERVICE_ACCOUNT_JSON_B64` or alias it during migration.
-- [ ] **kapso** + **posthog** — already remote, but wrap through gateway to hide keys / brand as official.
-- [ ] **tiktok-ads** (choiz only; ignore tiktok-organic for now).
-- [ ] **power-bi** — special case, deferred (token expiry issue, see memory).
+- [x] **gsc** (choiz + timeless) — done 2026-04-29. Public package `mcp-server-gsc`, no Choiz fork. Reuses GA4 service-account JSON via compose alias. Two identical containers; tenant separation purely slug-based.
+- [x] **kapso** — done 2026-04-29 late. First **remote-proxy** MCP: gateway-only proxy to `https://app.kapso.ai/mcp` with `X-API-Key` injection. NO container, NO Dockerfile, NO CI build job; only `gateway/src/index.ts` + `compose.yml` env + `.env`. See `project_remote_proxy_pattern` and `project_kapso_deployed_state` memories.
+- [~] **posthog** — DROPPED. Anthropic shipped a native PostHog connector in claude.ai; no need to wrap.
+- [~] **tiktok-ads** — DEFERRED. Choiz is not currently running paid TikTok ads, so the migration is parked until that activity resumes.
+- [ ] **tiktok-organic** — possible candidate. Status of the local config unknown (Santi unsure if it currently works). Verify before queueing.
+- [ ] **power-bi** — Santi flagged this as a priority on 2026-04-29 EOD: he wants Power BI usable from a Claude Code routine without Power BI Desktop being open. The `powerbi-modeling-mcp` we use today is local-bound (talks to localhost XMLA on Desktop). The right path is service-principal + Power BI Service XMLA endpoint (headless, server-side refresh token). Not a 1-hour task; needs an MCP that can target the Service endpoint, plus an Azure AD app registration. Research pending.
+- [ ] **google-ads** — last and conditional. Two compounding blockers (stateless tunnel storm + stateful supergateway #126). If revisited, **evaluate swapping the fork for a different google-ads MCP** rather than fighting the same one.
 
 For each one, decide whether it belongs on the gateway:
 
