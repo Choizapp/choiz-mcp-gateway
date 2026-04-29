@@ -13,9 +13,7 @@ const upstreams: Record<string, string | undefined> = {
   "/mcp/facebook-timeless": process.env.UPSTREAM_FACEBOOK_TIMELESS,
   "/mcp/instagram-choiz":    process.env.UPSTREAM_INSTAGRAM_CHOIZ,
   "/mcp/instagram-timeless": process.env.UPSTREAM_INSTAGRAM_TIMELESS,
-  // google-ads disabled 2026-04-28 — destabilizes cloudflared tunnel.
-  // See compose.yml comment block above the google_ads_mcp service.
-  // "/mcp/google-ads":        process.env.UPSTREAM_GOOGLE_ADS,
+  "/mcp/google-ads":         process.env.UPSTREAM_GOOGLE_ADS,
 };
 
 // --- Health check (no auth) ---
