@@ -30,7 +30,7 @@
 
 FROM python:3.12-slim
 
-ARG GA4_MCP_SHA=18c8bac
+ARG GA4_MCP_SHA=a0278ff
 
 # git: clone source at build time.
 # nodejs/npm: install supergateway (the stdio <-> Streamable HTTP bridge).
@@ -81,11 +81,21 @@ EXPOSE 8080
 # supergateway captures that stdio and exposes it as Streamable HTTP on :8080.
 # --streamableHttpPath / matters: the gateway strips /mcp/<name> before
 # forwarding, so the upstream must serve at /.
+#
+# NOTE: --stateful was tried first (commit before this) on the assumption
+# that the gRPC connection-storm pattern from google-ads would also bite
+# GA4. In practice supergateway's stateful path tripped issue #126
+# ("Conflict: Only one SSE stream is allowed per session") on every
+# claude.ai session, SIGTERMing the python child after ~1 tool call.
+# Reverted to default --stateless. The google-analytics-data SDK is much
+# lighter than google-ads (no protobuf descriptor pool, single channel
+# per request), so the connection-storm hypothesis is unlikely to
+# reproduce. If it does, the auto-reboot escalation in monitor-tunnel.yml
+# will recover the host without manual intervention.
 ENTRYPOINT ["/entrypoint.sh"]
 CMD [ \
   "--stdio", "python -m ga4_mcp", \
   "--outputTransport", "streamableHttp", \
   "--port", "8080", \
-  "--streamableHttpPath", "/", \
-  "--stateful" \
+  "--streamableHttpPath", "/" \
 ]
