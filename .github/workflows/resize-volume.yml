@@ -1,0 +1,173 @@
+name: Resize gateway root volume
+
+# One-shot workflow to grow the EBS root volume of the gateway EC2.
+#
+# Two stages:
+#   1. AWS-side modify-volume (online, no downtime). Polls until state moves
+#      from "modifying" to "optimizing" — at that point the new size is fully
+#      visible to the OS and we can grow the partition + filesystem.
+#   2. OS-side growpart + resize2fs/xfs_growfs via SSM.
+#
+# Requires the IAM policy `EbsResizeGatewayRoot` (or equivalent) attached to
+# `choiz-mcp-gateway-ci`, allowing ec2:DescribeVolumes,
+# ec2:DescribeVolumesModifications, ec2:ModifyVolume.
+#
+# Manual dispatch only. Concurrency-gated so two parallel resizes can't race.
+
+on:
+  workflow_dispatch:
+    inputs:
+      target_size_gb:
+        description: 'New EBS size in GB (must be larger than current)'
+        required: true
+        type: string
+      volume_id:
+        description: 'EBS Volume ID'
+        required: true
+        default: 'vol-0d6f98af994dc6869'
+        type: string
+
+permissions:
+  id-token: write
+  contents: read
+
+concurrency:
+  group: resize-volume
+  cancel-in-progress: false
+
+jobs:
+  resize:
+    name: Modify volume + grow filesystem
+    runs-on: ubuntu-latest
+    steps:
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ secrets.AWS_REGION }}
+
+      - name: Read current volume state
+        id: pre
+        env:
+          VOL: ${{ inputs.volume_id }}
+        run: |
+          set -euo pipefail
+          aws ec2 describe-volumes --volume-ids "$VOL" \
+            --query 'Volumes[0].[VolumeId,VolumeType,Size,State,Iops,Throughput]' \
+            --output table
+          SIZE=$(aws ec2 describe-volumes --volume-ids "$VOL" --query 'Volumes[0].Size' --output text)
+          STATE=$(aws ec2 describe-volumes --volume-ids "$VOL" --query 'Volumes[0].State' --output text)
+          echo "current_size=$SIZE" >> "$GITHUB_OUTPUT"
+          if [ "$STATE" != "in-use" ] && [ "$STATE" != "available" ]; then
+            echo "Unexpected volume state '$STATE', aborting"
+            exit 1
+          fi
+
+      - name: Validate target size
+        env:
+          TARGET: ${{ inputs.target_size_gb }}
+          CURRENT: ${{ steps.pre.outputs.current_size }}
+        run: |
+          set -euo pipefail
+          if ! echo "$TARGET" | grep -Eq '^[0-9]+$'; then
+            echo "target_size_gb must be a positive integer, got '$TARGET'"
+            exit 1
+          fi
+          if [ "$TARGET" -le "$CURRENT" ]; then
+            echo "target_size_gb ($TARGET) must be greater than current size ($CURRENT)"
+            exit 1
+          fi
+          echo "Will grow from ${CURRENT} GiB to ${TARGET} GiB"
+
+      - name: Modify volume
+        env:
+          VOL: ${{ inputs.volume_id }}
+          TARGET: ${{ inputs.target_size_gb }}
+        run: |
+          set -euo pipefail
+          aws ec2 modify-volume --volume-id "$VOL" --size "$TARGET" \
+            --query 'VolumeModification.[VolumeId,ModificationState,TargetSize,Progress]' \
+            --output table
+
+      - name: Poll until optimizing or completed
+        env:
+          VOL: ${{ inputs.volume_id }}
+        run: |
+          set -euo pipefail
+          for i in $(seq 1 60); do
+            STATE=$(aws ec2 describe-volumes-modifications --volume-ids "$VOL" --query 'VolumesModifications[0].ModificationState' --output text)
+            PROGRESS=$(aws ec2 describe-volumes-modifications --volume-ids "$VOL" --query 'VolumesModifications[0].Progress' --output text)
+            echo "tick $i: state=$STATE progress=${PROGRESS}%"
+            case "$STATE" in
+              optimizing|completed)
+                echo "AWS side done. OS-side grow can proceed."
+                exit 0 ;;
+              failed)
+                echo "Modification FAILED"
+                exit 1 ;;
+            esac
+            sleep 10
+          done
+          echo "Timed out waiting for AWS-side resize"
+          exit 1
+
+      - name: Grow partition + filesystem via SSM
+        env:
+          INSTANCE_ID: ${{ secrets.EC2_INSTANCE_ID }}
+        run: |
+          set -euo pipefail
+          read -r -d '' CMD <<'EOSCRIPT' || true
+          set -e
+          DEV=$(findmnt / -no SOURCE)
+          FSTYPE=$(findmnt / -no FSTYPE)
+          DISK=$(lsblk -no pkname "$DEV")
+          # Strip the disk prefix (and optional 'p' for nvme) to get the partition number.
+          PART=$(echo "$DEV" | sed -E "s|/dev/${DISK}p?||")
+          echo "device=$DEV fstype=$FSTYPE disk=$DISK partition=$PART"
+          echo "--- before ---"
+          lsblk
+          df -h /
+          echo "--- growpart ---"
+          sudo growpart "/dev/$DISK" "$PART" || {
+            rc=$?
+            # growpart returns 1 with NOCHANGE message if there is nothing to grow,
+            # which is fine. Anything else is a real failure.
+            if [ "$rc" -eq 1 ] && sudo growpart -N "/dev/$DISK" "$PART" 2>&1 | grep -qi nochange; then
+              echo "Partition already at target size"
+            else
+              exit "$rc"
+            fi
+          }
+          echo "--- resize fs ---"
+          case "$FSTYPE" in
+            ext2|ext3|ext4) sudo resize2fs "$DEV" ;;
+            xfs)            sudo xfs_growfs / ;;
+            *) echo "Unsupported fstype: $FSTYPE"; exit 1 ;;
+          esac
+          echo "--- after ---"
+          lsblk
+          df -h /
+          EOSCRIPT
+          CMD_B64=$(printf '%s' "$CMD" | base64 -w0)
+          CMD_ID=$(aws ssm send-command \
+            --instance-ids "$INSTANCE_ID" \
+            --document-name "AWS-RunShellScript" \
+            --comment "EBS root volume grow" \
+            --timeout-seconds 120 \
+            --parameters "commands=[\"echo $CMD_B64 | base64 -d | sh\"]" \
+            --query 'Command.CommandId' --output text)
+          echo "CommandId: $CMD_ID"
+          for i in $(seq 1 36); do
+            STATUS=$(aws ssm get-command-invocation --command-id "$CMD_ID" --instance-id "$INSTANCE_ID" --query 'Status' --output text 2>/dev/null || echo "Pending")
+            case "$STATUS" in
+              Success|Failed|Cancelled|TimedOut) break ;;
+            esac
+            sleep 5
+          done
+          echo "::group::stdout"
+          aws ssm get-command-invocation --command-id "$CMD_ID" --instance-id "$INSTANCE_ID" --query 'StandardOutputContent' --output text
+          echo "::endgroup::"
+          echo "::group::stderr"
+          aws ssm get-command-invocation --command-id "$CMD_ID" --instance-id "$INSTANCE_ID" --query 'StandardErrorContent' --output text
+          echo "::endgroup::"
+          [ "$STATUS" = "Success" ] || exit 1
