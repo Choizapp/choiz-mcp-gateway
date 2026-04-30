@@ -25,8 +25,11 @@ name: Monitor SSM agent health
 # Repo is public so all GHA + AWS API calls are free at our volume.
 
 on:
-  schedule:
-    - cron: '*/5 * * * *'
+  # Cron disabled 2026-04-30: today's MTBZ is ~10-15 min and we suspect
+  # SSM activity correlates with zombies. Re-enable after host-snapshot
+  # data identifies the actual root cause.
+  # schedule:
+  #   - cron: '*/5 * * * *'
   workflow_dispatch:
 
 permissions:
