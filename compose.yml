@@ -131,12 +131,23 @@ services:
   # in supergateway stateful mode (#124 child-process leak, #126
   # SIGTERM-on-reconnect). If a leak appears, the container OOMs cleanly
   # and restarts.
+  #
+  # Bumped 800m → 1500m on 2026-04-30: when claude.ai loads multiple
+  # connectors in parallel (user adding a connector or refreshing the
+  # session) supergateway --stateless spawns several python children
+  # carrying the heavy google-analytics-data gRPC stack at once. Under
+  # the old 800m limit the cgroup OOMed and supergateway exited code
+  # 137; the user-visible symptom was "Authorization with the MCP
+  # server failed" in claude.ai. The host now has a 4 GB swapfile that
+  # absorbs host-level pressure (vm.swappiness=10), so we no longer
+  # need such a tight per-container fence. See host-snapshot logs
+  # 2026-04-30 14:35-14:49 UTC for the spike + recovery pattern.
   ga4_choiz_mcp:
     image: ghcr.io/choizapp/choiz-mcp-gateway/ga4:${IMAGE_TAG:-latest}
     environment:
       GA4_SERVICE_ACCOUNT_JSON_B64: ${GA4_SERVICE_ACCOUNT_JSON_B64:?set GA4_SERVICE_ACCOUNT_JSON_B64 in .env}
       GA4_PROPERTY_ID: ${GA4_CHOIZ_PROPERTY_ID:?set GA4_CHOIZ_PROPERTY_ID in .env}
-    mem_limit: 800m
+    mem_limit: 1500m
     pids_limit: 100
     restart: unless-stopped
 
@@ -145,7 +156,7 @@ services:
     environment:
       GA4_SERVICE_ACCOUNT_JSON_B64: ${GA4_SERVICE_ACCOUNT_JSON_B64:?set GA4_SERVICE_ACCOUNT_JSON_B64 in .env}
       GA4_PROPERTY_ID: ${GA4_TIMELESS_PROPERTY_ID:?set GA4_TIMELESS_PROPERTY_ID in .env}
-    mem_limit: 800m
+    mem_limit: 1500m
     pids_limit: 100
     restart: unless-stopped
 
@@ -158,11 +169,16 @@ services:
   # with access to both Choiz + Timeless GSC sites). The compose-level
   # rename surfaces it as GSC_SERVICE_ACCOUNT_JSON_B64 inside the
   # container so the GSC entrypoint doesn't read a "GA4_*" name.
+  # Bumped 500m → 1500m on 2026-04-30: gsc was the most frequent
+  # offender — RestartCount=2 in <30 min during user MCP-load test on
+  # 2026-04-30, supergateway children dying with exit 137 (cgroup OOM)
+  # under claude.ai's parallel initialize storm. See ga4 comment above
+  # for the full rationale (host now has 4 GB swap as backstop).
   gsc_choiz_mcp:
     image: ghcr.io/choizapp/choiz-mcp-gateway/gsc:${IMAGE_TAG:-latest}
     environment:
       GSC_SERVICE_ACCOUNT_JSON_B64: ${GA4_SERVICE_ACCOUNT_JSON_B64:?set GA4_SERVICE_ACCOUNT_JSON_B64 in .env}
-    mem_limit: 500m
+    mem_limit: 1500m
     pids_limit: 100
     restart: unless-stopped
 
@@ -170,7 +186,7 @@ services:
     image: ghcr.io/choizapp/choiz-mcp-gateway/gsc:${IMAGE_TAG:-latest}
     environment:
       GSC_SERVICE_ACCOUNT_JSON_B64: ${GA4_SERVICE_ACCOUNT_JSON_B64:?set GA4_SERVICE_ACCOUNT_JSON_B64 in .env}
-    mem_limit: 500m
+    mem_limit: 1500m
     pids_limit: 100
     restart: unless-stopped
 
