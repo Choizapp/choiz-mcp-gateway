@@ -1,0 +1,200 @@
+name: Monitor SSM agent health
+
+# Cron-based detection of the "SSM-dead-tunnel-up" zombie mode observed
+# 2026-04-30. monitor-tunnel.yml only catches zombies that take down the
+# cloudflared tunnel; this workflow catches the case where the tunnel
+# keeps responding 200 but the SSM agent on the host is dead, which
+# causes ad-hoc shell, deploys, and monitor-tunnel's own restart attempt
+# to silently fail. The user-visible symptom is claude.ai's generic
+# "Authorization with the MCP server failed" tool error.
+#
+# Strategy: send a trivial `echo <unique-marker>` via SSM, confirm the
+# marker comes back. If not, wait 60s and probe again — only escalates
+# to reboot when BOTH probes show the zombie signature, which debounces
+# transient AWS-side blips.
+#
+# Zombie signature = Status=Failed AND empty stdout AND marker not
+# echoed back. We DO NOT escalate on Status=TimedOut, Pending, or
+# Cancelled — those would happen if the agent is just busy (e.g. a
+# deploy-gateway SSM command in progress) and rebooting then would
+# kill an in-flight deploy.
+#
+# Reboot path: aws ec2 reboot-instances (hypervisor, no agent needed),
+# same path monitor-tunnel uses for its zombie escalation.
+#
+# Repo is public so all GHA + AWS API calls are free at our volume.
+
+on:
+  schedule:
+    - cron: '*/5 * * * *'
+  workflow_dispatch:
+
+permissions:
+  id-token: write     # OIDC for AWS role
+  contents: read
+  issues: write       # to open ops issues
+
+concurrency:
+  group: monitor-ssm
+  cancel-in-progress: false
+
+jobs:
+  check:
+    name: Probe SSM agent
+    runs-on: ubuntu-latest
+    steps:
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ secrets.AWS_REGION }}
+
+      - name: Probe SSM (1st)
+        id: probe1
+        env:
+          INSTANCE_ID: ${{ secrets.EC2_INSTANCE_ID }}
+          MARKER: SSM_ALIVE_${{ github.run_id }}_1
+        run: |
+          set +e
+          CMD_ID=$(aws ssm send-command \
+            --instance-ids "$INSTANCE_ID" \
+            --document-name "AWS-RunShellScript" \
+            --comment "ssm-monitor probe 1" \
+            --timeout-seconds 30 \
+            --parameters "commands=[\"echo $MARKER\"]" \
+            --query 'Command.CommandId' --output text 2>/dev/null)
+          if [ -z "$CMD_ID" ] || [ "$CMD_ID" = "None" ]; then
+            echo "Probe 1: send-command call failed (AWS-side error)."
+            echo "alive=inconclusive" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          STATUS=Pending
+          for _ in $(seq 1 6); do
+            STATUS=$(aws ssm get-command-invocation --command-id "$CMD_ID" --instance-id "$INSTANCE_ID" --query 'Status' --output text 2>/dev/null || echo "Pending")
+            case "$STATUS" in
+              Success|Failed|Cancelled|TimedOut) break ;;
+            esac
+            sleep 5
+          done
+          OUT=$(aws ssm get-command-invocation --command-id "$CMD_ID" --instance-id "$INSTANCE_ID" --query 'StandardOutputContent' --output text 2>/dev/null)
+          OUT_TRIM=$(echo "$OUT" | tr -d '[:space:]')
+          echo "Probe 1: status=$STATUS, output_len=${#OUT}"
+          if [ "$STATUS" = "Success" ] && echo "$OUT" | grep -qF "$MARKER"; then
+            echo "alive=true" >> "$GITHUB_OUTPUT"
+          elif [ "$STATUS" = "Failed" ] && [ -z "$OUT_TRIM" ]; then
+            echo "alive=false" >> "$GITHUB_OUTPUT"
+          else
+            # Pending/TimedOut/Cancelled or any weird state with output.
+            # Treat as inconclusive — agent is probably just busy.
+            echo "alive=inconclusive" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Probe SSM (2nd, debounce)
+        if: steps.probe1.outputs.alive == 'false'
+        id: probe2
+        env:
+          INSTANCE_ID: ${{ secrets.EC2_INSTANCE_ID }}
+          MARKER: SSM_ALIVE_${{ github.run_id }}_2
+        run: |
+          set +e
+          echo "Probe 1 returned the zombie signature. Waiting 60s before second probe."
+          sleep 60
+          CMD_ID=$(aws ssm send-command \
+            --instance-ids "$INSTANCE_ID" \
+            --document-name "AWS-RunShellScript" \
+            --comment "ssm-monitor probe 2" \
+            --timeout-seconds 30 \
+            --parameters "commands=[\"echo $MARKER\"]" \
+            --query 'Command.CommandId' --output text 2>/dev/null)
+          if [ -z "$CMD_ID" ] || [ "$CMD_ID" = "None" ]; then
+            echo "Probe 2: send-command call failed (AWS-side error)."
+            echo "alive=inconclusive" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          STATUS=Pending
+          for _ in $(seq 1 6); do
+            STATUS=$(aws ssm get-command-invocation --command-id "$CMD_ID" --instance-id "$INSTANCE_ID" --query 'Status' --output text 2>/dev/null || echo "Pending")
+            case "$STATUS" in
+              Success|Failed|Cancelled|TimedOut) break ;;
+            esac
+            sleep 5
+          done
+          OUT=$(aws ssm get-command-invocation --command-id "$CMD_ID" --instance-id "$INSTANCE_ID" --query 'StandardOutputContent' --output text 2>/dev/null)
+          OUT_TRIM=$(echo "$OUT" | tr -d '[:space:]')
+          echo "Probe 2: status=$STATUS, output_len=${#OUT}"
+          if [ "$STATUS" = "Success" ] && echo "$OUT" | grep -qF "$MARKER"; then
+            echo "alive=true" >> "$GITHUB_OUTPUT"
+          elif [ "$STATUS" = "Failed" ] && [ -z "$OUT_TRIM" ]; then
+            echo "alive=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "alive=inconclusive" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Reboot via EC2 API (SSM agent dead)
+        if: steps.probe1.outputs.alive == 'false' && steps.probe2.outputs.alive == 'false'
+        id: reboot
+        env:
+          INSTANCE_ID: ${{ secrets.EC2_INSTANCE_ID }}
+        run: |
+          set -euo pipefail
+          echo "Both SSM probes showed the zombie signature. Rebooting via EC2 API."
+          aws ec2 reboot-instances --instance-ids "$INSTANCE_ID"
+          echo "Reboot issued at $(date -u +%H:%M:%SZ). Waiting 180s for host + agent to come back."
+          sleep 180
+
+      - name: Verify SSM recovered (post-reboot)
+        if: steps.reboot.outcome == 'success'
+        id: final
+        env:
+          INSTANCE_ID: ${{ secrets.EC2_INSTANCE_ID }}
+        run: |
+          set +e
+          ok=false
+          for i in 1 2 3; do
+            MARKER="SSM_RECOVERED_${{ github.run_id }}_$i"
+            CMD_ID=$(aws ssm send-command \
+              --instance-ids "$INSTANCE_ID" \
+              --document-name "AWS-RunShellScript" \
+              --comment "ssm-monitor post-reboot probe" \
+              --timeout-seconds 30 \
+              --parameters "commands=[\"echo $MARKER\"]" \
+              --query 'Command.CommandId' --output text 2>/dev/null)
+            if [ -n "$CMD_ID" ] && [ "$CMD_ID" != "None" ]; then
+              STATUS=Pending
+              for _ in $(seq 1 6); do
+                STATUS=$(aws ssm get-command-invocation --command-id "$CMD_ID" --instance-id "$INSTANCE_ID" --query 'Status' --output text 2>/dev/null || echo "Pending")
+                case "$STATUS" in
+                  Success|Failed|Cancelled|TimedOut) break ;;
+                esac
+                sleep 5
+              done
+              OUT=$(aws ssm get-command-invocation --command-id "$CMD_ID" --instance-id "$INSTANCE_ID" --query 'StandardOutputContent' --output text 2>/dev/null)
+              if [ "$STATUS" = "Success" ] && echo "$OUT" | grep -qF "$MARKER"; then
+                ok=true
+                break
+              fi
+            fi
+            echo "Post-reboot probe attempt $i: agent not yet responding"
+            sleep 30
+          done
+          echo "alive=$ok" >> "$GITHUB_OUTPUT"
+          echo "Final SSM check: alive=$ok"
+
+      - name: Open issue on persistent failure
+        if: steps.reboot.outcome == 'success' && steps.final.outputs.alive != 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh issue create \
+            --repo ${{ github.repository }} \
+            --title "[ops] SSM agent persistently dead at $(date -u +%H:%MZ)" \
+            --body "Auto-monitor detected the SSM agent was dead (Failed + empty output on two probes 60s apart) and the EC2 API reboot did not bring it back within ~3 min.
+
+          - Probe 1: ${{ steps.probe1.outputs.alive }}
+          - Probe 2: ${{ steps.probe2.outputs.alive }}
+          - Reboot: ${{ steps.reboot.outcome }}
+          - Final probe: ${{ steps.final.outputs.alive }}
+          - Run: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
+
+          Manual intervention required. From AWS Console: EC2 → Stop → wait → Start (Reboot already failed)." \
+            --label "ops"
