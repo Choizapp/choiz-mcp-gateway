@@ -89,6 +89,72 @@ jobs:
           echo "Re-probe HTTP $status at $(date -u +%H:%M:%SZ)"
           [ "$status" = "200" ] && echo "Tunnel recovered after restart" || echo "Tunnel STILL unhealthy after restart"
 
+      # Capture host diagnostics BEFORE escalating to API reboot. The reboot
+      # erases evidence (kernel logs survive but most ephemeral state goes),
+      # so we want a snapshot taken on the live (zombi) host. Best-effort:
+      # if the SSM agent is fully dead this step's output will be empty, but
+      # the step does not block the reboot. See project_tunnel_zombie_2026-04-29_late
+      # for the hypotheses we want to confirm with this data.
+      - name: Capture pre-reboot diagnostics (best-effort)
+        if: steps.probe.outputs.status != '200' && steps.reprobe.outputs.status != '200' && steps.restart.outputs.ssm_status != 'Success'
+        id: diag
+        env:
+          INSTANCE_ID: ${{ secrets.EC2_INSTANCE_ID }}
+        continue-on-error: true
+        run: |
+          set +e
+          mkdir -p diagnostics
+          DIAG_SCRIPT='echo "=== uname + uptime ==="; uname -a; uptime; echo;
+          echo "=== journalctl cloudflared (15 min) ==="; journalctl --no-pager --since "15 min ago" -u cloudflared 2>&1 | tail -200; echo;
+          echo "=== journalctl warnings (15 min) ==="; journalctl --no-pager --since "15 min ago" --priority=warning 2>&1 | tail -200; echo;
+          echo "=== dmesg tail ==="; dmesg 2>&1 | tail -200; echo;
+          echo "=== free -m ==="; free -m; echo;
+          echo "=== vmstat 1 5 ==="; vmstat 1 5; echo;
+          echo "=== docker stats ==="; docker stats --no-stream 2>&1 | head -30; echo;
+          echo "=== TCP established count ==="; ss -tn state established 2>&1 | wc -l; echo;
+          echo "=== top processes by RSS ==="; ps -eo pid,user,rss,comm --sort=-rss 2>&1 | head -15'
+          CMD_B64=$(printf '%s' "$DIAG_SCRIPT" | base64 -w0)
+          CMD_ID=$(aws ssm send-command \
+            --instance-ids "$INSTANCE_ID" \
+            --document-name "AWS-RunShellScript" \
+            --comment "tunnel-monitor pre-reboot diagnostics" \
+            --timeout-seconds 30 \
+            --parameters "commands=[\"echo $CMD_B64 | base64 -d | sh\"]" \
+            --query 'Command.CommandId' --output text 2>/dev/null)
+          if [ -z "$CMD_ID" ] || [ "$CMD_ID" = "None" ]; then
+            echo "Could not send SSM diag command (agent likely dead)." | tee diagnostics/zombie-snapshot.txt
+            echo "captured=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "Diag SSM CommandId: $CMD_ID"
+          STATUS=Pending
+          for _ in $(seq 1 12); do
+            STATUS=$(aws ssm get-command-invocation --command-id "$CMD_ID" --instance-id "$INSTANCE_ID" --query 'Status' --output text 2>/dev/null || echo "Pending")
+            case "$STATUS" in
+              Success|Failed|Cancelled|TimedOut) break ;;
+            esac
+            sleep 5
+          done
+          echo "Diag SSM final status: $STATUS"
+          if [ "$STATUS" = "Success" ]; then
+            aws ssm get-command-invocation --command-id "$CMD_ID" --instance-id "$INSTANCE_ID" --query 'StandardOutputContent' --output text > diagnostics/zombie-snapshot.txt 2>/dev/null
+            LINES=$(wc -l < diagnostics/zombie-snapshot.txt)
+            echo "Captured $LINES lines of diagnostics."
+            echo "captured=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "SSM diag did not complete (status=$STATUS) — agent likely dead." | tee diagnostics/zombie-snapshot.txt
+            echo "captured=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Upload diagnostics artifact
+        if: always() && steps.diag.conclusion != 'skipped'
+        uses: actions/upload-artifact@v4
+        with:
+          name: zombie-diagnostics-${{ github.run_id }}
+          path: diagnostics/
+          retention-days: 90
+          if-no-files-found: ignore
+
       # If SSM didn't return Success, the EC2 OS is fully hung (agent dead).
       # Reboot via the EC2 API — that path goes through the hypervisor and
       # does NOT need a working SSM agent on the instance.
@@ -104,16 +170,20 @@ jobs:
           echo "Reboot issued at $(date -u +%H:%M:%SZ). Waiting 120s for host + cloudflared to come back."
           sleep 120
 
+      # Bumped 2026-04-30 from 4×20s to 6×30s (~3 min): on 2026-04-29 the
+      # third zombi recovery took ~4m22s from API reboot to first 200, which
+      # exceeded the previous 80s window and triggered a false-alarm ops
+      # issue. See project_tunnel_zombie_2026-04-29_late.
       - name: Final re-probe (with retries for slow boot)
         if: steps.probe.outputs.status != '200'
         id: final
         run: |
           status=000
-          for i in 1 2 3 4; do
+          for i in 1 2 3 4 5 6; do
             status=$(curl -s -o /dev/null -w "%{http_code}" -m 10 https://tunnel.choiz.com.mx/healthz || echo "000")
             echo "Final probe attempt $i: HTTP $status at $(date -u +%H:%M:%SZ)"
             [ "$status" = "200" ] && break
-            sleep 20
+            sleep 30
           done
           echo "status=$status" >> "$GITHUB_OUTPUT"
 
@@ -122,17 +192,24 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          gh issue create \
-            --repo ${{ github.repository }} \
-            --title "[ops] Tunnel persistently unhealthy at $(date -u +%H:%MZ)" \
-            --body "Auto-monitor detected that the Cloudflare Tunnel was unhealthy and neither the SSM-based cloudflared restart nor a hypervisor-level instance reboot recovered it.
+          DIAG_BLOCK=""
+          if [ -f diagnostics/zombie-snapshot.txt ]; then
+            DIAG_BLOCK=$'\n\n## Pre-reboot diagnostics (first 200 lines)\n\n```\n'"$(head -200 diagnostics/zombie-snapshot.txt)"$'\n```\n'
+          fi
+          BODY="Auto-monitor detected that the Cloudflare Tunnel was unhealthy and neither the SSM-based cloudflared restart nor a hypervisor-level instance reboot recovered it.
 
           - First probe: HTTP ${{ steps.probe.outputs.status }}
           - SSM restart status: ${{ steps.restart.outputs.ssm_status }}
           - Re-probe after restart: HTTP ${{ steps.reprobe.outputs.status }}
+          - Diagnostics captured: ${{ steps.diag.outputs.captured }}
           - Reboot via API attempted: ${{ steps.reboot.outcome }}
           - Final probe: HTTP ${{ steps.final.outputs.status }}
           - Run: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          - Diagnostics artifact: zombie-diagnostics-${{ github.run_id }} (download from the run page).
 
-          Manual intervention required. From AWS Console: EC2 → Stop → wait → Start (Reboot already failed)." \
+          Manual intervention required. From AWS Console: EC2 → Stop → wait → Start (Reboot already failed).${DIAG_BLOCK}"
+          gh issue create \
+            --repo ${{ github.repository }} \
+            --title "[ops] Tunnel persistently unhealthy at $(date -u +%H:%MZ)" \
+            --body "$BODY" \
             --label "ops"
