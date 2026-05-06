@@ -34,12 +34,19 @@ ENV PATH="/opt/venv/bin:${PATH}"
 # https://github.com/crystaldba/postgres-mcp/commit/07eb329c
 RUN pip install --no-cache-dir 'git+https://github.com/crystaldba/postgres-mcp.git@07eb329c'
 
+COPY entrypoint.py /opt/entrypoint.py
+
 EXPOSE 8080
 
+# We invoke postgres-mcp through entrypoint.py so we can monkey-patch
+# FastMCP.__init__ in place to default streamable_http_path="/". The
+# patch is applied to the original class (NOT a subclass) so generic
+# parameterisation `FastMCP[X]` keeps working — that's the trap that
+# bit us in the previous attempt.
+#
 # DATABASE_URI is read from env by postgres-mcp.
 # --access-mode=restricted blocks DML/DDL; only SELECT/EXPLAIN are allowed.
-# --transport streamable-http serves MCP Streamable HTTP directly on 0.0.0.0:8080.
-ENTRYPOINT ["postgres-mcp"]
+ENTRYPOINT ["python", "/opt/entrypoint.py"]
 CMD [ \
   "--transport", "streamable-http", \
   "--streamable-http-host", "0.0.0.0", \
