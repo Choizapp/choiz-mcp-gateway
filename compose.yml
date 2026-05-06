@@ -75,11 +75,6 @@ services:
       FASTMCP_STREAMABLE_HTTP_PATH: "/"
     restart: unless-stopped
     # No ports: block. Gateway reaches it by service name on the internal network.
-    # FastMCP is configured to serve streamable-http at "/" via mcp/warehouse/entrypoint.py
-    # (a Python wrapper that monkey-patches the SDK before postgres-mcp imports it).
-    # The pydantic-settings env var FASTMCP_STREAMABLE_HTTP_PATH does NOT work for
-    # this — verified empirically — because FastMCP's __init__ kwarg default
-    # overrides env vars in pydantic-settings precedence.
 
   meta_ads_mcp:
     image: ghcr.io/choizapp/choiz-mcp-gateway/meta-ads:${IMAGE_TAG:-latest}
