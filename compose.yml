@@ -19,7 +19,13 @@ services:
     environment:
       PORT: "8080"
       WORKER_SHARED_SECRET: ${WORKER_SHARED_SECRET:?set WORKER_SHARED_SECRET in .env}
-      UPSTREAM_WAREHOUSE: "http://warehouse_mcp:8080"
+      # warehouse_mcp now runs postgres-mcp natively with --transport streamable-http.
+      # FastMCP (the MCP SDK behind postgres-mcp) serves at /mcp/ by default and does
+      # not expose a CLI arg to change it, so we include /mcp in the target. The gateway's
+      # pathRewrite strips the public prefix /mcp/warehouse and http-proxy-middleware
+      # concatenates the remainder onto the target, so the upstream sees /mcp/<rest>.
+      # When postgres-mcp 0.4.0+ ships with a path arg we can simplify this back.
+      UPSTREAM_WAREHOUSE: "http://warehouse_mcp:8080/mcp"
       UPSTREAM_META_ADS: "http://meta_ads_mcp:8080"
       UPSTREAM_FACEBOOK_CHOIZ: "http://facebook_choiz_mcp:8080"
       UPSTREAM_FACEBOOK_TIMELESS: "http://facebook_timeless_mcp:8080"
