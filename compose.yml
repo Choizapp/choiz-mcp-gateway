@@ -65,16 +65,13 @@ services:
     image: ghcr.io/choizapp/choiz-mcp-gateway/warehouse:${IMAGE_TAG:-latest}
     environment:
       DATABASE_URI: ${WAREHOUSE_DATABASE_URL:?set WAREHOUSE_DATABASE_URL in .env}
-      # postgres-mcp uses FastMCP (mcp[cli]>=1.25.0) which defaults to serving
-      # streamable-http at /mcp. Override to / via the pydantic-settings env var
-      # (env_prefix=FASTMCP_) so the upstream serves at the same path the gateway
-      # forwards to (after pathRewrite strips the public prefix). Without this,
-      # FastMCP issues a 307 redirect to its canonical /mcp URL, but the
-      # redirect's Location uses the internal docker hostname, which is
-      # unreachable from claude.ai's vantage point.
-      FASTMCP_STREAMABLE_HTTP_PATH: "/"
     restart: unless-stopped
     # No ports: block. Gateway reaches it by service name on the internal network.
+    # FastMCP is configured to serve streamable-http at "/" via mcp/warehouse/entrypoint.py
+    # (a Python wrapper that monkey-patches the SDK before postgres-mcp imports it).
+    # The pydantic-settings env var FASTMCP_STREAMABLE_HTTP_PATH does NOT work for
+    # this — verified empirically — because FastMCP's __init__ kwarg default
+    # overrides env vars in pydantic-settings precedence.
 
   meta_ads_mcp:
     image: ghcr.io/choizapp/choiz-mcp-gateway/meta-ads:${IMAGE_TAG:-latest}
