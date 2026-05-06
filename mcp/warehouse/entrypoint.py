@@ -37,7 +37,17 @@ _orig_init = _fastmcp_pkg.FastMCP.__init__
 
 
 def _patched_init(self, *args, **kwargs):  # type: ignore[no-untyped-def]
+    # Force streamable-http path "/" (see module docstring).
     kwargs.setdefault("streamable_http_path", "/")
+    # Force host "0.0.0.0" so FastMCP's auto-enabled DNS rebinding
+    # protection (triggered for localhost/127.0.0.1/::1) does NOT engage.
+    # Otherwise transport_security rejects requests whose Host header
+    # is "warehouse_mcp:8080" (the value http-proxy-middleware sets when
+    # the gateway uses changeOrigin: true) with HTTP 421 Misdirected
+    # Request / "Invalid Host header". postgres-mcp overrides
+    # settings.host later from --streamable-http-host anyway, so this
+    # default is harmless.
+    kwargs.setdefault("host", "0.0.0.0")
     _orig_init(self, *args, **kwargs)
 
 
