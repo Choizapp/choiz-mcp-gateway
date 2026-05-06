@@ -75,8 +75,22 @@ for (const [prefix, target] of Object.entries(upstreams)) {
     createProxyMiddleware({
       target,
       changeOrigin: true,
-      // Strip the prefix so the upstream sees the path it expects (e.g. /sse).
-      pathRewrite: { [`^${prefix}`]: "" },
+      // Strip the prefix AND any trailing slash so the upstream sees the path
+      // it expects without a stray "/". Two regexes applied in order:
+      //   1. `^<prefix>/?$`  matches the prefix exactly, with optional trailing
+      //      slash. Replaces with "" so the request URL becomes empty (the
+      //      target's own path is kept verbatim).
+      //   2. `^<prefix>/`    matches the prefix followed by a sub-path. Replaces
+      //      with "/" so e.g. /mcp/foo/messages becomes /messages, then gets
+      //      appended to the target path normally.
+      // This matters for upstreams that 307-redirect requests with a trailing
+      // slash to the slashless canonical URL. FastMCP serving streamable-http
+      // at /mcp does this — the redirect's Location is an absolute URL using
+      // the internal Docker hostname, which is unreachable from claude.ai.
+      pathRewrite: {
+        [`^${prefix}/?$`]: "",
+        [`^${prefix}/`]: "/",
+      },
       // Preserve streaming (SSE, chunked responses).
       selfHandleResponse: false,
       on: {
