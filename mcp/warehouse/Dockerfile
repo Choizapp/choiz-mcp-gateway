@@ -1,44 +1,48 @@
-# Combined image for the warehouse MCP:
-#   - postgres-mcp runs as a stdio-transport subprocess (its native mode).
-#   - supergateway exposes it over MCP Streamable HTTP on :8080, which is the
-#     transport claude.ai speaks.
+# Warehouse MCP — postgres-mcp with native Streamable HTTP transport.
 #
-# We combine them in one container because supergateway only translates
-# stdio -> (sse|ws|streamableHttp); it does NOT do sse -> streamableHttp. So
-# we need postgres-mcp on stdin/stdout of supergateway.
+# History: previously this image bundled supergateway to translate stdio
+# (postgres-mcp's only transport in v0.3.0) to MCP Streamable HTTP. That
+# combination caused a child-process leak: each request to the gateway
+# spawned a new postgres-mcp Python child, but supergateway in --stateless
+# mode did not reap them on completion. Containers grew to 2.5+ GB of RAM
+# after a few queries (9 zombie postgres-mcp processes × ~280 MB each),
+# eventually starving the host of memory and triggering the recurring
+# "tunnel zombie" pattern documented in MEMORY.md / project_tunnel_zombie_*.
 #
-# Base is python-slim (Debian) rather than node-alpine because installing a
-# Python package cleanly inside Alpine's musl + pipx combo has proven fragile
-# on ARM64. Adding Node on top of a Python base is straightforward.
+# Fix (2026-05-06): postgres-mcp's main branch (commit 07eb329c, Jan 2026)
+# added a native streamable-http transport via mcp.server.fastmcp's
+# run_streamable_http_async(). This eliminates the supergateway hop entirely:
+# one persistent Python process serves all requests in-band. No more child
+# zombies; Python's GC reclaims per-query allocations cleanly.
+#
+# We pin to the exact commit 07eb329c rather than a moving branch so builds
+# are reproducible. When upstream publishes 0.4.0+ on PyPI we can switch back
+# to a versioned pip install.
 
 FROM python:3.12-slim
 
-# Node.js LTS + build tools needed for native npm deps.
+# Just curl + ca-certs for any HTTPS deps the wheel pull may need.
 RUN apt-get update \
- && apt-get install -y --no-install-recommends curl ca-certificates gnupg \
- && curl -fsSL https://deb.nodesource.com/setup_20.x | bash - \
- && apt-get install -y --no-install-recommends nodejs \
+ && apt-get install -y --no-install-recommends ca-certificates curl git \
  && apt-get clean \
  && rm -rf /var/lib/apt/lists/*
 
-# postgres-mcp from PyPI. We use a venv under /opt so it doesn't conflict
-# with the system Python environment (PEP 668).
 RUN python -m venv /opt/venv
 ENV PATH="/opt/venv/bin:${PATH}"
-RUN pip install --no-cache-dir postgres-mcp
 
-# supergateway from npm, global install.
-RUN npm install -g supergateway
+# Pin to the commit that introduced --transport streamable-http support.
+# https://github.com/crystaldba/postgres-mcp/commit/07eb329c
+RUN pip install --no-cache-dir 'git+https://github.com/crystaldba/postgres-mcp.git@07eb329c'
 
 EXPOSE 8080
 
 # DATABASE_URI is read from env by postgres-mcp.
-# --stdio "<cmd>" spawns postgres-mcp, supergateway proxies the JSON-RPC
-# stream out on :8080 as MCP Streamable HTTP.
-ENTRYPOINT ["supergateway"]
+# --access-mode=restricted blocks DML/DDL; only SELECT/EXPLAIN are allowed.
+# --transport streamable-http serves MCP Streamable HTTP directly on 0.0.0.0:8080.
+ENTRYPOINT ["postgres-mcp"]
 CMD [ \
-  "--stdio", "postgres-mcp --access-mode=restricted", \
-  "--outputTransport", "streamableHttp", \
-  "--port", "8080", \
-  "--streamableHttpPath", "/" \
+  "--transport", "streamable-http", \
+  "--streamable-http-host", "0.0.0.0", \
+  "--streamable-http-port", "8080", \
+  "--access-mode", "restricted" \
 ]
