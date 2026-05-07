@@ -19,6 +19,11 @@ services:
     environment:
       PORT: "8080"
       WORKER_SHARED_SECRET: ${WORKER_SHARED_SECRET:?set WORKER_SHARED_SECRET in .env}
+      # Comma-separated list of Workspace domains the gateway will accept on
+      # the X-Choiz-User-Email header. Mirrors the Worker's
+      # ALLOWED_EMAIL_DOMAINS. Defaults inside auth.ts cover the same three
+      # if the env is unset, so this is mainly for explicitness + override.
+      ALLOWED_EMAIL_DOMAINS: ${ALLOWED_EMAIL_DOMAINS:-choiz.com.mx,choiz.com.ar,gotimeless.ai}
       UPSTREAM_WAREHOUSE: "http://warehouse_mcp:8080"
       UPSTREAM_META_ADS: "http://meta_ads_mcp:8080"
       UPSTREAM_FACEBOOK_CHOIZ: "http://facebook_choiz_mcp:8080"

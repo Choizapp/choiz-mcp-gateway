@@ -13,7 +13,8 @@ import type { UserProps, WorkerEnv } from "./types.js";
  *   Google -> GET /callback?code=...&state=...
  *     -> we exchange the code for Google's access_token
  *     -> we fetch the user's email from Google
- *     -> we verify the email is @choiz.com.mx and email_verified=true
+ *     -> we verify email_verified=true and the email's domain is in
+ *        ALLOWED_EMAIL_DOMAINS (comma-separated list of Workspace domains)
  *     -> we call completeAuthorization(...) with the user's email as props
  *         -> this mints an opaque token, stores it in OAUTH_KV, and gives us
  *            a redirect URL back to the original claude.ai redirect_uri
@@ -45,8 +46,12 @@ app.get("/authorize", async (c) => {
   googleUrl.searchParams.set("response_type", "code");
   googleUrl.searchParams.set("scope", "openid email profile");
   googleUrl.searchParams.set("state", state);
-  // `hd` hints the Workspace domain so the Google account picker pre-filters.
-  googleUrl.searchParams.set("hd", c.env.ALLOWED_EMAIL_DOMAIN);
+  // `hd=*` hints the Google account picker to show ANY Workspace account
+  // (rather than a single domain). We accept multiple domains
+  // (ALLOWED_EMAIL_DOMAINS), so a single-domain hd hint would hide accounts
+  // from the other allowed Workspaces. The post-callback check below still
+  // enforces the actual domain allowlist.
+  googleUrl.searchParams.set("hd", "*");
   // Force consent the first time, then skip it on subsequent logins.
   googleUrl.searchParams.set("prompt", "select_account");
 
@@ -109,9 +114,19 @@ app.get("/callback", async (c) => {
   if (!user.email || !user.email_verified) {
     return c.text("Google account has no verified email", 403);
   }
-  const domain = c.env.ALLOWED_EMAIL_DOMAIN;
-  if (!user.email.endsWith(`@${domain}`)) {
-    return c.text(`Only @${domain} accounts are allowed. You signed in as ${user.email}.`, 403);
+  const allowedDomains = c.env.ALLOWED_EMAIL_DOMAINS
+    .split(",")
+    .map((d) => d.trim())
+    .filter(Boolean);
+  const userDomain = user.email.split("@")[1] ?? "";
+  if (!allowedDomains.includes(userDomain)) {
+    return c.text(
+      `Your account (${user.email}) is not in the allowed domain list. ` +
+        `Contact ops if your domain should be added. Allowed: ${allowedDomains
+          .map((d) => `@${d}`)
+          .join(", ")}.`,
+      403,
+    );
   }
 
   const props: UserProps = { email: user.email, name: user.name };
