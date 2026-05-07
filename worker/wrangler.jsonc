@@ -16,7 +16,11 @@
   ],
   "vars": {
     "UPSTREAM_BASE": "https://tunnel.choiz.com.mx",
-    "ALLOWED_EMAIL_DOMAIN": "choiz.com.mx"
+    // Comma-separated list of Workspace domains we accept. The Worker rejects
+    // any other domain after the Google callback; the Google picker is broadened
+    // via `hd=*` so users can sign in from any of these without us hardcoding
+    // a single workspace.
+    "ALLOWED_EMAIL_DOMAINS": "choiz.com.mx,choiz.com.ar,gotimeless.ai"
   },
   "kv_namespaces": [
     {

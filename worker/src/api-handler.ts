@@ -12,8 +12,9 @@ import type { UserProps, WorkerEnv } from "./types.js";
  *   4. If invalid/expired, returns 401 before we ever run.
  *
  * So by the time this function is called, the caller has PROVEN they are a
- * specific @choiz.com.mx user (because Google signed off) and we can safely
- * stamp that identity into the upstream request.
+ * specific user in one of the ALLOWED_EMAIL_DOMAINS Workspaces (because
+ * Google signed off) and we can safely stamp that identity into the upstream
+ * request.
  *
  * Transport: the upstream pipeline (gateway -> adapter -> MCP server) speaks
  * MCP Streamable HTTP end-to-end, which is what claude.ai uses. The adapter

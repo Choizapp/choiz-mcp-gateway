@@ -8,7 +8,7 @@ declare namespace Cloudflare {
 	interface Env {
 		OAUTH_KV: KVNamespace;
 		UPSTREAM_BASE: "https://tunnel.choiz.com.mx";
-		ALLOWED_EMAIL_DOMAIN: "choiz.com.mx";
+		ALLOWED_EMAIL_DOMAINS: "choiz.com.mx,choiz.com.ar,gotimeless.ai";
 	}
 }
 interface Env extends Cloudflare.Env {}
@@ -16,7 +16,7 @@ type StringifyValues<EnvType extends Record<string, unknown>> = {
 	[Binding in keyof EnvType]: EnvType[Binding] extends string ? EnvType[Binding] : string;
 };
 declare namespace NodeJS {
-	interface ProcessEnv extends StringifyValues<Pick<Cloudflare.Env, "UPSTREAM_BASE" | "ALLOWED_EMAIL_DOMAIN">> {}
+	interface ProcessEnv extends StringifyValues<Pick<Cloudflare.Env, "UPSTREAM_BASE" | "ALLOWED_EMAIL_DOMAINS">> {}
 }
 
 // Begin runtime types
