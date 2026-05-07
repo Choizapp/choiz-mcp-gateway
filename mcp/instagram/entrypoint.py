@@ -39,12 +39,16 @@ from mcp.server.streamable_http_manager import StreamableHTTPSessionManager
 from starlette.applications import Starlette
 from starlette.routing import Mount
 
-# Make /app and /app/src importable regardless of CWD.
+# Make /app importable so `src` is found as a package. We must NOT add
+# /app/src to sys.path — that would import instagram_mcp_server as a
+# top-level module, breaking its `from .config import get_settings`
+# relative import (ImportError: attempted relative import with no known
+# parent package). The fork's previous launcher `python -m src.instagram_mcp_server`
+# preserved the package context the same way.
 sys.path.insert(0, "/app")
-sys.path.insert(0, "/app/src")
 
 # Imported for the side effect of building the InstagramMCPServer class.
-from instagram_mcp_server import InstagramMCPServer, get_settings  # noqa: E402
+from src.instagram_mcp_server import InstagramMCPServer, get_settings  # noqa: E402
 
 
 def _configure_logging() -> None:
