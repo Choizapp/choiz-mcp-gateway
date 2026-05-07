@@ -9,18 +9,27 @@ commit 2a09ac31.
 Key architectural points:
 
   - The official MCP defines ``mcp = FastMCP("Google Ads Server")`` at
-    ``ads_mcp.coordinator``. With OAuth env vars (``GOOGLE_ADS_MCP_OAUTH_*``)
-    the upstream's ``run_server()`` activates streamable-http via the
-    FastMCP OAuth Proxy (designed for clients to do an OAuth dance).
-  - We are gateway-fronted with a worker shared secret; the model cannot
-    do an OAuth flow. So we deliberately leave OAUTH_* vars unset and
-    bypass ``run_server()`` entirely. We import the FastMCP instance
-    directly and call ``mcp.run(transport="streamable-http")`` ourselves
-    via the warehouse-style FastMCP.__init__ monkey-patch.
+    ``ads_mcp.coordinator``, where ``FastMCP`` comes from the
+    ``fastmcp>=3.2`` package (gofastmcp.com), NOT from
+    ``mcp.server.fastmcp`` (which is the official MCP SDK's
+    bundled FastMCP and is a different class). The two have similar
+    APIs but distinct module paths and slightly different .run()
+    kwargs.
+  - With OAuth env vars (``GOOGLE_ADS_MCP_OAUTH_*``) the upstream's
+    ``run_server()`` activates streamable-http via the FastMCP OAuth
+    Proxy (designed for clients to do an OAuth dance).
+  - We are gateway-fronted with a worker shared secret; the model
+    cannot do an OAuth flow. So we deliberately leave OAUTH_* vars
+    unset and bypass ``run_server()`` entirely. We import the FastMCP
+    instance directly and call ``mcp.run(transport="streamable-http",
+    host=..., port=..., path=...)`` with explicit kwargs — fastmcp 3.x
+    defaults the path to ``"/mcp/"`` and the port to 8000, so we must
+    override both for the gateway to reach us at the expected URL.
   - Auth uses google-ads.yaml (static creds: developer_token, client_id,
-    client_secret, refresh_token, login_customer_id). We materialize the
-    yaml from env vars on container start and point the
-    google-ads-python lib at it via ``GOOGLE_ADS_CONFIGURATION_FILE_PATH``.
+    client_secret, refresh_token, login_customer_id). We materialize
+    the yaml from env vars on container start and point the
+    google-ads-python lib at it via
+    ``GOOGLE_ADS_CONFIGURATION_FILE_PATH``.
 
 This sidesteps the original tunnel-zombie problem by removing the
 supergateway --stateless respawn-storm entirely (single in-process
@@ -30,25 +39,6 @@ from __future__ import annotations
 
 import os
 import sys
-
-import mcp.server.fastmcp as _fastmcp_pkg
-
-_orig_init = _fastmcp_pkg.FastMCP.__init__
-
-
-def _patched_init(self, *args, **kwargs):  # type: ignore[no-untyped-def]
-    # Path "/" so the gateway (which strips /mcp/<slug>) reaches the server
-    # without a 307 redirect.
-    kwargs.setdefault("streamable_http_path", "/")
-    # Host 0.0.0.0 disables FastMCP's auto DNS-rebinding protection (which
-    # otherwise rejects the "google_ads_mcp:8080" Host header sent by
-    # http-proxy-middleware with changeOrigin: true).
-    kwargs.setdefault("host", "0.0.0.0")
-    kwargs.setdefault("port", 8080)
-    _orig_init(self, *args, **kwargs)
-
-
-_fastmcp_pkg.FastMCP.__init__ = _patched_init  # type: ignore[method-assign]
 
 
 def _materialize_google_ads_yaml() -> None:
@@ -96,7 +86,20 @@ def main() -> None:
     from ads_mcp.coordinator import mcp
 
     # FastMCP.run() drives an internal event loop, blocks until shutdown.
-    mcp.run(transport="streamable-http")
+    # Explicit kwargs:
+    #   host="0.0.0.0" — listen on all docker bridge interfaces (default
+    #     127.0.0.1 would reject the "google_ads_mcp:8080" hostname the
+    #     gateway uses).
+    #   port=8080 — match the gateway's UPSTREAM_GOOGLE_ADS URL.
+    #   path="/" — the gateway strips "/mcp/google-ads" before forwarding,
+    #     so the upstream must serve at root. Default in fastmcp 3.x is
+    #     "/mcp/", which would 404 / 502 on every request.
+    mcp.run(
+        transport="streamable-http",
+        host="0.0.0.0",
+        port=8080,
+        path="/",
+    )
 
 
 if __name__ == "__main__":
