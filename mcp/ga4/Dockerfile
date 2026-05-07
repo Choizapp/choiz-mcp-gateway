@@ -1,101 +1,61 @@
-# GA4 MCP — Google Analytics 4 reporting (run_report, schema browsing).
+# GA4 MCP — Google Analytics 4 reporting (run_report, run_funnel_report,
+# get_account_summaries, get_property_details, run_realtime_report,
+# get_custom_dimensions_and_metrics, list_google_ads_links).
 #
-# Source: https://github.com/Choizapp/choiz-ga4-mcp (Choiz fork, Google
-# Analytics 4 reporting on top of google-analytics-data v1beta).
+# Source: https://github.com/googleanalytics/google-analytics-mcp — the
+# **official** Google Analytics MCP, replacing the previous Choiz fork at
+# Choizapp/choiz-ga4-mcp@a0278ff (cutover 2026-05-07).
 #
-# Stack: Python; ga4_mcp/server.py defines a FastMCP instance and calls
-# mcp.run(transport="stdio") at the end of main(). Launcher: `python -m
-# ga4_mcp` — the package's __main__ wires it up.
+# Stack: Python; uses mcp.server.lowlevel.Server with hardcoded stdio
+# transport (analytics_mcp/server.py:run_server_async). We do NOT launch
+# the upstream `analytics-mcp` console script — instead /opt/entrypoint.py
+# imports analytics_mcp.coordinator.app (the Server instance) and serves
+# it directly through StreamableHTTPSessionManager + Starlette + uvicorn.
+# Same shape as mcp/instagram/.
 #
 # Multi-tenant: one image, two service blocks (ga4_choiz, ga4_timeless)
-# differing only in GA4_PROPERTY_ID. Service-account JSON is shared
-# between both tenants.
+# differing only in slug. The official MCP takes property_id as a tool
+# argument (not env), so both tenants point at the same code with the
+# same auth; the model passes the right property_id per call.
 #
-# Auth: service-account JSON. Two ways to get it into the container:
-#   (a) GA4_SERVICE_ACCOUNT_JSON_B64 env var (single-line base64) — what
-#       we use. Entrypoint decodes to /app/sa.json before launching.
-#   (b) Mounted file via Docker secret — rejected as overkill; the env
-#       pattern matches the rest of our MCPs.
+# Auth: GOOGLE_APPLICATION_CREDENTIALS file path. The Choiz reader SA JSON
+# is provided through the GA4_SERVICE_ACCOUNT_JSON_B64 env var; the
+# entrypoint base64-decodes it to /tmp/ga4-sa.json on each container
+# start (not at build time, so the JSON does not bake into the image).
 #
-# We wrap with supergateway (--stateful) so the python child + the
-# gRPC BetaAnalyticsDataClient persist across MCP requests on the same
-# session. The default --stateless mode would respawn the python child
-# per request, importing the heavy google-analytics-data gRPC stack and
-# opening fresh outbound channels each call — same connection-storm
-# pattern that destabilized the cloudflared tunnel under google-ads on
-# 2026-04-28. --stateful sidesteps that.
-#
-# The SHA below pins the exact build. Bump it intentionally when you
-# want to pick up upstream changes; CI/CD rebuilds and deploys.
+# Pin to commit 6fd3bf88 of the upstream main branch for reproducibility.
 
 FROM python:3.12-slim
 
-ARG GA4_MCP_SHA=a0278ff
+ARG GA4_MCP_SHA=6fd3bf88e2591855cf3fade7e3c791e1f6bda72d
 
-# git: clone source at build time.
-# nodejs/npm: install supergateway (the stdio <-> Streamable HTTP bridge).
-# ca-certificates: HTTPS to analyticsdata.googleapis.com (gRPC over TLS).
+# git: pip install from a git URL needs git in the image at install time.
+# ca-certificates: HTTPS to analyticsdata.googleapis.com + GitHub.
+# build-essential: some transitive deps (e.g. grpcio) build wheels on ARM64.
 RUN apt-get update \
- && apt-get install -y --no-install-recommends git ca-certificates nodejs npm \
+ && apt-get install -y --no-install-recommends git ca-certificates build-essential \
  && rm -rf /var/lib/apt/lists/*
 
-WORKDIR /app
+# Install the official MCP from a pinned commit. pyproject.toml registers
+# the analytics_mcp package + console scripts, but we don't use the script
+# (entrypoint.py imports the package directly).
+RUN pip install --no-cache-dir \
+    "git+https://github.com/googleanalytics/google-analytics-mcp.git@${GA4_MCP_SHA}" \
+    "uvicorn[standard]" \
+    starlette
 
-RUN git clone https://github.com/Choizapp/choiz-ga4-mcp.git . \
- && git checkout "${GA4_MCP_SHA}"
+# Strip build deps once wheels are compiled to keep the final layer slim.
+RUN apt-get purge -y --auto-remove build-essential && rm -rf /var/lib/apt/lists/*
 
-RUN pip install --no-cache-dir -r requirements.txt
-
-# supergateway bridges stdio <-> Streamable HTTP. --stateful keeps one
-# python child per MCP session (see comment above).
-RUN npm install -g supergateway
-
-# Disable Python stdio buffering so supergateway sees the MCP's initial
-# handshake immediately. Critical for the Streamable HTTP wrapper.
+# Flush stdout immediately so init logs land in `docker logs` without delay.
 ENV PYTHONUNBUFFERED=1
 
-# Default credentials path — set here so the python process picks it up
-# without the entrypoint having to export it.
-ENV GOOGLE_APPLICATION_CREDENTIALS=/app/sa.json
-
-# Custom entrypoint: decodes GA4_SERVICE_ACCOUNT_JSON_B64 to /app/sa.json,
-# then exec's supergateway with the full CMD args. Done at container
-# start (not at build) so the JSON does not bake into the image layer.
-RUN printf '%s\n' \
- '#!/bin/sh' \
- 'set -e' \
- 'if [ -z "${GA4_SERVICE_ACCOUNT_JSON_B64:-}" ]; then' \
- '  echo "ERROR: GA4_SERVICE_ACCOUNT_JSON_B64 not set" >&2' \
- '  exit 1' \
- 'fi' \
- 'echo "$GA4_SERVICE_ACCOUNT_JSON_B64" | base64 -d > /app/sa.json' \
- 'chmod 600 /app/sa.json' \
- 'exec supergateway "$@"' \
- > /entrypoint.sh \
- && chmod +x /entrypoint.sh
+COPY entrypoint.py /opt/entrypoint.py
 
 EXPOSE 8080
 
-# `python -m ga4_mcp` runs ga4_mcp/__main__.py which calls server.main().
-# server.main() calls mcp.run(transport="stdio") on the FastMCP instance.
-# supergateway captures that stdio and exposes it as Streamable HTTP on :8080.
-# --streamableHttpPath / matters: the gateway strips /mcp/<name> before
-# forwarding, so the upstream must serve at /.
-#
-# NOTE: --stateful was tried first (commit before this) on the assumption
-# that the gRPC connection-storm pattern from google-ads would also bite
-# GA4. In practice supergateway's stateful path tripped issue #126
-# ("Conflict: Only one SSE stream is allowed per session") on every
-# claude.ai session, SIGTERMing the python child after ~1 tool call.
-# Reverted to default --stateless. The google-analytics-data SDK is much
-# lighter than google-ads (no protobuf descriptor pool, single channel
-# per request), so the connection-storm hypothesis is unlikely to
-# reproduce. If it does, the auto-reboot escalation in monitor-tunnel.yml
-# will recover the host without manual intervention.
-ENTRYPOINT ["/entrypoint.sh"]
-CMD [ \
-  "--stdio", "python -m ga4_mcp", \
-  "--outputTransport", "streamableHttp", \
-  "--port", "8080", \
-  "--streamableHttpPath", "/" \
-]
+# entrypoint.py decodes GA4_SERVICE_ACCOUNT_JSON_B64 → /tmp/ga4-sa.json,
+# sets GOOGLE_APPLICATION_CREDENTIALS, imports the official package's
+# coordinator.app, and serves it via streamable-http on 0.0.0.0:8080.
+# No supergateway, no Node, no per-request child churn.
+ENTRYPOINT ["python", "/opt/entrypoint.py"]
