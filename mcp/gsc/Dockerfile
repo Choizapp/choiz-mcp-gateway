@@ -1,73 +1,70 @@
 # GSC MCP — Google Search Console (search_analytics, list_sites,
 # get_sitemap, index_inspect, ...).
 #
-# Source: public npm package `mcp-server-gsc` (ahonn/mcp-server-gsc), no
-# Choiz fork. Installed at image build via `npm install -g`.
+# Source: https://github.com/ahonn/mcp-server-gsc — public package, no
+# Choiz fork. Cloned at build time at a pinned commit and built locally
+# (the published npm tarball ships only the stdio launcher; we want
+# `dist/server.js`'s `createServer` builder so we can wire it through
+# the MCP TS SDK's StreamableHTTPServerTransport directly).
 #
-# Stack: Node MCP that natively speaks stdio. We wrap it with supergateway
-# (default --stateless mode) so the container exposes MCP Streamable HTTP
-# on :8080.
+# History: previously bundled supergateway to translate the package's
+# stdio MCP into Streamable HTTP. Same supergateway --stateless leak
+# pattern that hit warehouse / facebook / instagram — under sustained
+# load the Node child churn grows the container's RSS. Pre-fix on
+# 2026-05-07: gsc_choiz_mcp at 489 MiB resident with mem_limit 1500m.
 #
-# Multi-tenant pattern: TWO containers (gsc_choiz_mcp + gsc_timeless_mcp)
-# differing only in route slug. The package itself has NO site-filtering
-# env var; both services run identical configs. Tenant separation is
-# purely a UX convention via the connector slug — claude.ai picks the
-# right `siteUrl` per-tool-call based on which connector the user chose.
-# The shared service-account (ga4-mcp-reader, also used by GA4) has
-# access to both Choiz and Timeless GSC sites.
+# Fix (2026-05-07): drop Node + supergateway. /opt/entrypoint.mjs
+# imports `createServer` from the package's compiled output and
+# mounts it behind StreamableHTTPServerTransport in-process. Same
+# shape as mcp/instagram/ and mcp/ga4/ in spirit, just expressed in
+# Node instead of Python.
 #
-# Auth: same service-account JSON as GA4. Reused via the existing
-# `GA4_SERVICE_ACCOUNT_JSON_B64` env var on the EC2 .env, surfaced into
-# this container as `GSC_SERVICE_ACCOUNT_JSON_B64` (compose-level rename
-# so GA4 and GSC entrypoints can evolve independently). Container's
-# entrypoint decodes to /app/sa.json before launching, so the JSON does
-# not bake into the image layer.
+# Multi-tenant pattern unchanged: TWO containers (gsc_choiz_mcp +
+# gsc_timeless_mcp), 100% identical at the container level. The
+# package has no site-filter env var, so tenant separation is
+# slug-only. claude.ai picks the right `siteUrl` per-tool-call from
+# the connector context.
 #
-# Pin: the package version is unpinned (npm install -g pulls latest at
-# build time). If the package's tool surface changes in a way that
-# breaks our smoke test, pin to a specific version with @x.y.z.
+# Auth: same Choiz `ga4-mcp-reader` service-account JSON as GA4
+# (has siteFullUser on both choiz.com.mx and gotimeless.ai). Reused
+# via the existing `GA4_SERVICE_ACCOUNT_JSON_B64` env on the EC2
+# .env, surfaced into this container as `GSC_SERVICE_ACCOUNT_JSON_B64`
+# (compose-level rename so GA4 and GSC entrypoints can evolve
+# independently). The entrypoint decodes it once at start to
+# /tmp/gsc-sa.json (chmod 600) and passes the path to createServer.
 
 FROM node:20-slim
 
-# ca-certificates: HTTPS to searchconsole.googleapis.com.
-RUN apt-get update \
- && apt-get install -y --no-install-recommends ca-certificates \
- && rm -rf /var/lib/apt/lists/*
+ARG GSC_MCP_SHA=e671b155271b2b412a302cff1e72f6e14424a7ac
 
-# Install both the GSC MCP server and supergateway in one shot.
-RUN npm install -g mcp-server-gsc supergateway
+# git: clone source at build time. ca-certificates: HTTPS to
+# searchconsole.googleapis.com.
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends git ca-certificates \
+ && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 
-# Default credentials path — set here so mcp-server-gsc finds the SA file
-# without the entrypoint having to export it.
-ENV GOOGLE_APPLICATION_CREDENTIALS=/app/sa.json
+# Clone the package and build it. We need the compiled dist/ so our
+# entrypoint can import { createServer } from "./dist/server.js".
+# `npm install` (without --production) fetches devDeps required by
+# tsc; `npm run build` runs tsc + chmod on dist/*.js.
+RUN git clone https://github.com/ahonn/mcp-server-gsc.git . \
+ && git checkout "${GSC_MCP_SHA}" \
+ && npm install \
+ && npm run build \
+ && npm prune --production
 
-# Custom entrypoint: decodes GSC_SERVICE_ACCOUNT_JSON_B64 to /app/sa.json,
-# then exec's supergateway with the full CMD args. Done at container
-# start (not at build) so the JSON does not bake into the image.
-RUN printf '%s\n' \
- '#!/bin/sh' \
- 'set -e' \
- 'if [ -z "${GSC_SERVICE_ACCOUNT_JSON_B64:-}" ]; then' \
- '  echo "ERROR: GSC_SERVICE_ACCOUNT_JSON_B64 not set" >&2' \
- '  exit 1' \
- 'fi' \
- 'echo "$GSC_SERVICE_ACCOUNT_JSON_B64" | base64 -d > /app/sa.json' \
- 'chmod 600 /app/sa.json' \
- 'exec supergateway "$@"' \
- > /entrypoint.sh \
- && chmod +x /entrypoint.sh
+# Our streamable-http launcher. Bundled in /app so its
+# `import "./dist/server.js"` resolves correctly and so its
+# `import "@modelcontextprotocol/sdk/server/streamableHttp.js"` finds
+# the SDK in /app/node_modules.
+COPY entrypoint.mjs /app/entrypoint.mjs
 
 EXPOSE 8080
 
-# `mcp-server-gsc` is a stdio MCP server. supergateway wraps it as
-# Streamable HTTP on :8080. --streamableHttpPath / matters: the gateway
-# strips /mcp/<name> before forwarding.
-ENTRYPOINT ["/entrypoint.sh"]
-CMD [ \
-  "--stdio", "mcp-server-gsc", \
-  "--outputTransport", "streamableHttp", \
-  "--port", "8080", \
-  "--streamableHttpPath", "/" \
-]
+# `node /app/entrypoint.mjs` decodes the SA JSON, builds the GSC
+# Server, mounts it behind StreamableHTTPServerTransport and binds a
+# Node http server on 0.0.0.0:8080. No supergateway, no per-request
+# child spawning.
+ENTRYPOINT ["node", "/app/entrypoint.mjs"]

@@ -165,11 +165,17 @@ services:
   # with access to both Choiz + Timeless GSC sites). The compose-level
   # rename surfaces it as GSC_SERVICE_ACCOUNT_JSON_B64 inside the
   # container so the GSC entrypoint doesn't read a "GA4_*" name.
-  # Bumped 500m → 1500m on 2026-04-30: gsc was the most frequent
-  # offender — RestartCount=2 in <30 min during user MCP-load test on
-  # 2026-04-30, supergateway children dying with exit 137 (cgroup OOM)
-  # under claude.ai's parallel initialize storm. See ga4 comment above
-  # for the full rationale (host now has 4 GB swap as backstop).
+  #
+  # Cutover 2026-05-07 (PR): supergateway dropped. /opt/entrypoint.mjs
+  # imports the package's `createServer` builder and mounts it behind
+  # StreamableHTTPServerTransport in-process — same shape as
+  # warehouse / facebook / instagram / ga4 / google-ads, just in Node.
+  # Pre-fix gsc_choiz_mcp ran at ~489 MiB resident under the
+  # supergateway --stateless leak; expect a similar drop here as the
+  # other Phase 1 MCPs.
+  #
+  # mem_limit retained at 1500m for now — actual post-fix resident is
+  # likely 50-100 MiB. Revisit after stress test.
   gsc_choiz_mcp:
     image: ghcr.io/choizapp/choiz-mcp-gateway/gsc:${IMAGE_TAG:-latest}
     environment:
