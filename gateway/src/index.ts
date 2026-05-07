@@ -17,9 +17,11 @@ const upstreams: Record<string, string | undefined> = {
   "/mcp/ga4-timeless":       process.env.UPSTREAM_GA4_TIMELESS,
   "/mcp/gsc-choiz":          process.env.UPSTREAM_GSC_CHOIZ,
   "/mcp/gsc-timeless":       process.env.UPSTREAM_GSC_TIMELESS,
-  // google-ads disabled 2026-04-28 — destabilizes cloudflared tunnel.
-  // See compose.yml comment block above the google_ads_mcp service.
-  // "/mcp/google-ads":        process.env.UPSTREAM_GOOGLE_ADS,
+  // google-ads re-enabled 2026-05-07 with official googleads/google-ads-mcp
+  // (PR #15). The original 2026-04-28 disable was due to supergateway
+  // --stateless gRPC respawn-storms; the official MCP runs in-process under
+  // FastMCP so the storm pattern is structurally gone.
+  "/mcp/google-ads":         process.env.UPSTREAM_GOOGLE_ADS,
 };
 
 // --- Remote MCPs proxied through the gateway (no internal container) ---

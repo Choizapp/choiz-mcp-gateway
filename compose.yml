@@ -34,16 +34,13 @@ services:
       # gateway/src/index.ts logs a skip-warning otherwise. See memory
       # project_wrap_remote_mcps + the remoteUpstreams table in index.ts.
       KAPSO_API_KEY: ${KAPSO_API_KEY:-}
-      # UPSTREAM_GOOGLE_ADS disabled 2026-04-28: this MCP destabilizes the
-      # cloudflared tunnel. Empirically confirmed by user — any claude.ai
-      # interaction with the google-ads container caused tunnel zombie within
-      # seconds, taking down all other MCPs. The likely trigger is the heavy
-      # gRPC import + outbound channel storm to googleads.googleapis.com
-      # under supergateway --stateless (which respawns the python child per
-      # request). Re-enable only after switching supergateway to stateful
-      # mode or running this MCP on a separate host. See memory
-      # project_google_ads_destabilizes_host_CONFIRMED.
-      # UPSTREAM_GOOGLE_ADS: "http://google_ads_mcp:8080"
+      # Re-enabled 2026-05-07: cutover to the official googleads/google-ads-mcp
+      # eliminates supergateway --stateless, so the original tunnel-zombie
+      # trigger (per-request gRPC channel storm to googleads.googleapis.com)
+      # is structurally gone. Single in-process FastMCP holds one persistent
+      # GoogleAdsClient. See memory project_google_ads_destabilizes_host_CONFIRMED
+      # for the original incident.
+      UPSTREAM_GOOGLE_ADS: "http://google_ads_mcp:8080"
     ports:
       # Bind only to the host's loopback; cloudflared runs on the same host.
       - "127.0.0.1:8080:8080"
@@ -58,7 +55,7 @@ services:
       - ga4_timeless_mcp
       - gsc_choiz_mcp
       - gsc_timeless_mcp
-      # - google_ads_mcp  # disabled — see UPSTREAM_GOOGLE_ADS comment above
+      - google_ads_mcp
     restart: unless-stopped
 
   warehouse_mcp:
@@ -189,33 +186,26 @@ services:
     pids_limit: 100
     restart: unless-stopped
 
-  # Google Ads MCP — DISABLED 2026-04-28. Empirically confirmed that any
-  # claude.ai interaction with this container triggers a cloudflared tunnel
-  # zombie within seconds, taking down all the other MCPs. We had previously
-  # blamed cloudflared 2026.3.0 for unrelated zombies and downgraded to
-  # 2025.11.1; with the downgrade in place AND google-ads stopped, the stack
-  # is stable. Re-introducing google-ads under load reproduces the symptom.
+  # Google Ads MCP — re-enabled 2026-05-07 with the official
+  # googleads/google-ads-mcp@2a09ac31. The original 2026-04-28 disable
+  # was due to supergateway --stateless respawn-storming the heavy
+  # google-ads gRPC stack on every request, which destabilized the
+  # cloudflared tunnel. The official MCP runs in-process under FastMCP
+  # via mcp/google-ads/entrypoint.py (warehouse-style monkey-patch); a
+  # single GoogleAdsClient persists across requests. No supergateway,
+  # no Node, no per-request churn — the storm pattern is structurally
+  # impossible.
   #
-  # Hypothesis (not yet validated): supergateway --stateless respawns the
-  # python child per claude.ai request, each respawn imports the heavy
-  # google-ads gRPC stack and opens fresh outbound channels to
-  # googleads.googleapis.com:443. The connection storm appears to interfere
-  # with cloudflared's QUIC connections to Cloudflare edge.
-  #
-  # Re-enable path: either (a) switch supergateway to stateful mode so the
-  # python child + gRPC client persist across calls, or (b) host the
-  # google-ads MCP on a separate EC2 / VPC where its network activity does
-  # not compete with the gateway tunnel. The image (ghcr.io/.../google-ads)
-  # and the env vars in .env are kept so re-enabling is just a compose edit.
-  #
-  # google_ads_mcp:
-  #   image: ghcr.io/choizapp/choiz-mcp-gateway/google-ads:${IMAGE_TAG:-latest}
-  #   environment:
-  #     GOOGLE_ADS_OAUTH_CLIENT_ID: ${GOOGLE_ADS_OAUTH_CLIENT_ID:?set GOOGLE_ADS_OAUTH_CLIENT_ID in .env}
-  #     GOOGLE_ADS_OAUTH_CLIENT_SECRET: ${GOOGLE_ADS_OAUTH_CLIENT_SECRET:?set GOOGLE_ADS_OAUTH_CLIENT_SECRET in .env}
-  #     GOOGLE_ADS_OAUTH_REFRESH_TOKEN: ${GOOGLE_ADS_OAUTH_REFRESH_TOKEN:?set GOOGLE_ADS_OAUTH_REFRESH_TOKEN in .env}
-  #     GOOGLE_ADS_DEVELOPER_TOKEN: ${GOOGLE_ADS_DEVELOPER_TOKEN:?set GOOGLE_ADS_DEVELOPER_TOKEN in .env}
-  #     GOOGLE_ADS_LOGIN_CUSTOMER_ID: ${GOOGLE_ADS_LOGIN_CUSTOMER_ID:?set GOOGLE_ADS_LOGIN_CUSTOMER_ID in .env}
-  #   mem_limit: 800m
-  #   pids_limit: 100
-  #   restart: unless-stopped
+  # Auth: static creds via /tmp/google-ads.yaml materialized from env
+  # vars at container start. Same env contract as the previous fork.
+  # Single tenant (Choiz MCC 3916621621). The model passes the
+  # specific customer_id per tool call.
+  google_ads_mcp:
+    image: ghcr.io/choizapp/choiz-mcp-gateway/google-ads:${IMAGE_TAG:-latest}
+    environment:
+      GOOGLE_ADS_OAUTH_CLIENT_ID: ${GOOGLE_ADS_OAUTH_CLIENT_ID:?set GOOGLE_ADS_OAUTH_CLIENT_ID in .env}
+      GOOGLE_ADS_OAUTH_CLIENT_SECRET: ${GOOGLE_ADS_OAUTH_CLIENT_SECRET:?set GOOGLE_ADS_OAUTH_CLIENT_SECRET in .env}
+      GOOGLE_ADS_OAUTH_REFRESH_TOKEN: ${GOOGLE_ADS_OAUTH_REFRESH_TOKEN:?set GOOGLE_ADS_OAUTH_REFRESH_TOKEN in .env}
+      GOOGLE_ADS_DEVELOPER_TOKEN: ${GOOGLE_ADS_DEVELOPER_TOKEN:?set GOOGLE_ADS_DEVELOPER_TOKEN in .env}
+      GOOGLE_ADS_LOGIN_CUSTOMER_ID: ${GOOGLE_ADS_LOGIN_CUSTOMER_ID:?set GOOGLE_ADS_LOGIN_CUSTOMER_ID in .env}
+    restart: unless-stopped
