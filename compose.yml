@@ -119,38 +119,34 @@ services:
       INSTAGRAM_API_VERSION: "v23.0"
     restart: unless-stopped
 
-  # GA4 MCP — multi-tenant pattern, mirroring facebook/instagram. One
-  # image, two containers, distinguished only by GA4_PROPERTY_ID. The
-  # service-account JSON (GA4_SERVICE_ACCOUNT_JSON_B64) is shared between
-  # tenants (single Choiz reader account).
+  # GA4 MCP — official googleanalytics/google-analytics-mcp wrapped in
+  # streamable-http. Multi-tenant pattern: one image, two containers
+  # serving slugs /mcp/ga4-choiz and /mcp/ga4-timeless. Both containers
+  # are functionally identical — the official MCP takes property_id as
+  # a TOOL ARGUMENT (not an env var), so the model passes the right
+  # property per call. The two containers exist purely so claude.ai
+  # connectors stay separated by brand at the slug level (same pattern
+  # as gsc).
   #
-  # Wraps the choiz-ga4-mcp Python server with `supergateway --stateful`.
-  # Stateful is mandatory here: this MCP wraps the google-analytics-data
-  # gRPC SDK, which is the same family that destabilized the cloudflared
-  # tunnel under google-ads on 2026-04-28 when run under default stateless
-  # mode. Stateful keeps one warm gRPC client per session instead of
-  # respawning the python child per request.
+  # Service-account JSON (GA4_SERVICE_ACCOUNT_JSON_B64) is shared between
+  # tenants (single Choiz reader account with access to both Choiz +
+  # Timeless GA4 properties).
   #
-  # mem_limit + pids_limit retained as defense-in-depth against open bugs
-  # in supergateway stateful mode (#124 child-process leak, #126
-  # SIGTERM-on-reconnect). If a leak appears, the container OOMs cleanly
-  # and restarts.
+  # Cutover 2026-05-07 (PR #14): replaced the Choiz fork
+  # (Choizapp/choiz-ga4-mcp@a0278ff) and dropped supergateway. The
+  # official MCP uses mcp.server.lowlevel.Server with hardcoded stdio;
+  # mcp/ga4/entrypoint.py mounts it behind StreamableHTTPSessionManager
+  # + uvicorn. Same shape as instagram (PR #12 + #13).
   #
-  # Bumped 800m → 1500m on 2026-04-30: when claude.ai loads multiple
-  # connectors in parallel (user adding a connector or refreshing the
-  # session) supergateway --stateless spawns several python children
-  # carrying the heavy google-analytics-data gRPC stack at once. Under
-  # the old 800m limit the cgroup OOMed and supergateway exited code
-  # 137; the user-visible symptom was "Authorization with the MCP
-  # server failed" in claude.ai. The host now has a 4 GB swapfile that
-  # absorbs host-level pressure (vm.swappiness=10), so we no longer
-  # need such a tight per-container fence. See host-snapshot logs
-  # 2026-04-30 14:35-14:49 UTC for the spike + recovery pattern.
+  # mem_limit retained at 1500m as defense-in-depth pending
+  # post-deploy measurement. The single-process pattern that landed
+  # warehouse + facebook + instagram drops resident from ~1 GB to
+  # ~50-150 MB, so this cap is likely loose; revisit after a stress
+  # test.
   ga4_choiz_mcp:
     image: ghcr.io/choizapp/choiz-mcp-gateway/ga4:${IMAGE_TAG:-latest}
     environment:
       GA4_SERVICE_ACCOUNT_JSON_B64: ${GA4_SERVICE_ACCOUNT_JSON_B64:?set GA4_SERVICE_ACCOUNT_JSON_B64 in .env}
-      GA4_PROPERTY_ID: ${GA4_CHOIZ_PROPERTY_ID:?set GA4_CHOIZ_PROPERTY_ID in .env}
     mem_limit: 1500m
     pids_limit: 100
     restart: unless-stopped
@@ -159,7 +155,6 @@ services:
     image: ghcr.io/choizapp/choiz-mcp-gateway/ga4:${IMAGE_TAG:-latest}
     environment:
       GA4_SERVICE_ACCOUNT_JSON_B64: ${GA4_SERVICE_ACCOUNT_JSON_B64:?set GA4_SERVICE_ACCOUNT_JSON_B64 in .env}
-      GA4_PROPERTY_ID: ${GA4_TIMELESS_PROPERTY_ID:?set GA4_TIMELESS_PROPERTY_ID in .env}
     mem_limit: 1500m
     pids_limit: 100
     restart: unless-stopped
