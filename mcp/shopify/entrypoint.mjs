@@ -203,14 +203,14 @@ async function readJsonBody(req) {
   });
 }
 
-function send400(res, message) {
+function sendError(res, status, code, message) {
   if (res.headersSent) return;
-  res.statusCode = 400;
+  res.statusCode = status;
   res.setHeader("content-type", "application/json");
   res.end(
     JSON.stringify({
       jsonrpc: "2.0",
-      error: { code: -32000, message },
+      error: { code, message },
       id: null,
     }),
   );
@@ -220,19 +220,47 @@ async function handle(req, res) {
   const sessionId = req.headers["mcp-session-id"];
   const method = req.method || "GET";
 
+  // Spec compliance (MCP 2025-03-26, Streamable HTTP transport):
+  // "If a request is sent to the server with an Mcp-Session-Id but the
+  // server has terminated the session (or the session ID was never
+  // valid), the server MUST respond with HTTP 404 Not Found."
+  //
+  // This is the recovery path after a container restart: claude.ai
+  // holds the previous container's session-id, our `transports` map is
+  // empty (the new container can't possibly know about it), so we tell
+  // the client to re-initialize. The client then sends a fresh POST
+  // without Mcp-Session-Id and an initialize body, which falls into
+  // the "new session" branch below.
+  //
+  // Pre-fix this returned 400, and claude.ai surfaced it as the
+  // generic "Authorization with the MCP server failed (ofid_...)"
+  // error with no recovery. Burned half a day chasing a non-existent
+  // payload-size ceiling before realizing every deploy was orphaning
+  // claude.ai's cached session-id.
+  if (sessionId && !transports[sessionId]) {
+    sendError(
+      res,
+      404,
+      -32001,
+      "Session not found; re-initialize with no Mcp-Session-Id",
+    );
+    return;
+  }
+
   if (method === "POST") {
     let body;
     try {
       body = await readJsonBody(req);
     } catch (err) {
-      send400(res, `Invalid JSON body: ${String(err)}`);
+      sendError(res, 400, -32700, `Invalid JSON body: ${String(err)}`);
       return;
     }
 
     let transport;
-    if (sessionId && transports[sessionId]) {
+    if (sessionId) {
+      // Known good (handled by the unknown-session check above).
       transport = transports[sessionId];
-    } else if (!sessionId && body && isInitializeRequest(body)) {
+    } else if (body && isInitializeRequest(body)) {
       transport = new StreamableHTTPServerTransport({
         sessionIdGenerator: () => randomUUID(),
         onsessioninitialized: (id) => {
@@ -252,7 +280,7 @@ async function handle(req, res) {
       await transport.handleRequest(req, res, body);
       return;
     } else {
-      send400(res, "Bad Request: No valid session ID provided");
+      sendError(res, 400, -32000, "Bad Request: No valid session ID provided");
       return;
     }
     await transport.handleRequest(req, res, body);
@@ -260,8 +288,8 @@ async function handle(req, res) {
   }
 
   if (method === "GET" || method === "DELETE") {
-    if (!sessionId || !transports[sessionId]) {
-      send400(res, "Invalid or missing session ID");
+    if (!sessionId) {
+      sendError(res, 400, -32000, "Missing Mcp-Session-Id");
       return;
     }
     await transports[sessionId].handleRequest(req, res);
