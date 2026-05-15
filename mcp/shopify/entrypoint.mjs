@@ -76,6 +76,90 @@ console.error(
 console.error("allowed tools:", readOnly.map((t) => t.name).join(", "));
 console.error("denied (writes):", denied.join(", "));
 
+// --- Response trimming -----------------------------------------------------
+//
+// claude.ai silently rejects MCP tool results above ~2-3 KB. A raw Shopify
+// Admin GraphQL response for `get-orders limit:10` is ~6-9 KB once you
+// include lineItems + shippingAddress + billingAddress + taxLines per
+// order. The model "gets stuck thinking" with no surfaced error.
+//
+// Policy: for LIST tools, drop the heavy nested fields so the response is
+// a usable summary (id, name, totals, top-level customer info, status).
+// DETAIL tools (`*-by-id`) and known-small tools (shop-info, locations,
+// markets, metafield-definitions, inventory-*, price-lists,
+// product-variants-detailed) pass through unmodified — single records
+// fit the ceiling, and detail is what the by-id calls exist for.
+//
+// Add/remove fields per tool here. The trim is recursive: any object in
+// the result tree that has a matching key gets that key deleted. This
+// covers wrappers like `{orders: [...], pageInfo: {...}}` correctly —
+// pageInfo's properties are not in TRIM_RULES so they stay.
+const TRIM_RULES = {
+  "get-orders": [
+    "lineItems",
+    "shippingAddress",
+    "billingAddress",
+    "taxLines",
+    "discountApplications",
+    "note",
+  ],
+  "get-customer-orders": [
+    "lineItems",
+    "shippingAddress",
+    "billingAddress",
+    "taxLines",
+    "discountApplications",
+    "note",
+  ],
+  "get-products": [
+    "variants",
+    "images",
+    "media",
+    "descriptionHtml",
+    "options",
+    "metafields",
+    "seo",
+  ],
+  "get-customers": ["addresses", "defaultAddress", "note", "metafields"],
+  "get-collections": ["products", "descriptionHtml", "image"],
+  "get-fulfillment-orders": ["lineItems"],
+};
+
+// Runtime telemetry: how many top-level objects had at least one field
+// stripped, per tool. Logged on every tool call. Cheap signal for
+// tuning the trim list later.
+const trimCounts = {};
+function trim(toolName, obj) {
+  const fields = TRIM_RULES[toolName];
+  if (!fields) return obj;
+  let hits = 0;
+  function walk(v) {
+    if (Array.isArray(v)) return v.map(walk);
+    if (v && typeof v === "object") {
+      const out = {};
+      let touched = false;
+      for (const [k, val] of Object.entries(v)) {
+        if (fields.includes(k)) {
+          touched = true;
+          continue;
+        }
+        out[k] = walk(val);
+      }
+      if (touched) hits++;
+      return out;
+    }
+    return v;
+  }
+  const trimmed = walk(obj);
+  if (hits > 0) {
+    trimCounts[toolName] = (trimCounts[toolName] || 0) + hits;
+    console.error(
+      `trim ${toolName}: stripped from ${hits} object(s); cumulative=${trimCounts[toolName]}`,
+    );
+  }
+  return trimmed;
+}
+
 // Build a fresh McpServer with the read-only tools registered. Called
 // once per new MCP session (i.e. per claude.ai connector connection).
 function buildMcpServer() {
@@ -83,14 +167,15 @@ function buildMcpServer() {
     name: "shopify",
     version: "1.0.0",
     description:
-      "Shopify Admin GraphQL — read-only subset (products, orders, customers, inventory, collections, metafields). Pass `limit` low (<=5) on list calls to stay under claude.ai's ~2-3 KB tool-result ceiling.",
+      "Shopify Admin GraphQL — read-only subset (products, orders, customers, inventory, collections, metafields). Lists are trimmed of heavy nested fields (lineItems, addresses, variants, images) to fit claude.ai's ~2-3 KB tool-result ceiling. For full details on a single record, use the matching `*-by-id` tool.",
   });
   for (const tool of readOnly) {
     server.tool(tool.name, tool.schema.shape, async (args) => {
-      const result = await tool.execute(args);
+      const raw = await tool.execute(args);
+      const trimmed = trim(tool.name, raw);
       return {
-        // Compact JSON: claude.ai rejects tool-results over ~2-3 KB.
-        content: [{ type: "text", text: JSON.stringify(result) }],
+        // Compact JSON: every byte counts against the ceiling.
+        content: [{ type: "text", text: JSON.stringify(trimmed) }],
       };
     });
   }
