@@ -38,3 +38,11 @@ services:
   gsc_timeless_mcp:
     build: ./mcp/gsc
     image: ghcr.io/choizapp/choiz-mcp-gateway/gsc:dev
+
+  shopify_choiz_mcp:
+    build: ./mcp/shopify
+    image: ghcr.io/choizapp/choiz-mcp-gateway/shopify:dev
+
+  shopify_timeless_mcp:
+    build: ./mcp/shopify
+    image: ghcr.io/choizapp/choiz-mcp-gateway/shopify:dev

@@ -17,6 +17,8 @@ const upstreams: Record<string, string | undefined> = {
   "/mcp/ga4-timeless":       process.env.UPSTREAM_GA4_TIMELESS,
   "/mcp/gsc-choiz":          process.env.UPSTREAM_GSC_CHOIZ,
   "/mcp/gsc-timeless":       process.env.UPSTREAM_GSC_TIMELESS,
+  "/mcp/shopify-choiz":      process.env.UPSTREAM_SHOPIFY_CHOIZ,
+  "/mcp/shopify-timeless":   process.env.UPSTREAM_SHOPIFY_TIMELESS,
   // google-ads re-enabled 2026-05-07 with official googleads/google-ads-mcp
   // (PR #15). The original 2026-04-28 disable was due to supergateway
   // --stateless gRPC respawn-storms; the official MCP runs in-process under

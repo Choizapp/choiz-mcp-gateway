@@ -51,6 +51,7 @@ jobs:
       google_ads: ${{ steps.filter.outputs.google_ads }}
       ga4: ${{ steps.filter.outputs.ga4 }}
       gsc: ${{ steps.filter.outputs.gsc }}
+      shopify: ${{ steps.filter.outputs.shopify }}
       compose: ${{ steps.filter.outputs.compose }}
     steps:
       - uses: actions/checkout@v4
@@ -74,6 +75,8 @@ jobs:
               - 'mcp/ga4/**'
             gsc:
               - 'mcp/gsc/**'
+            shopify:
+              - 'mcp/shopify/**'
             compose:
               - 'compose.yml'
 
@@ -295,13 +298,40 @@ jobs:
           cache-from: type=gha,scope=gsc
           cache-to: type=gha,mode=max,scope=gsc
 
+  build-shopify:
+    name: Build shopify image
+    needs: changes
+    if: needs.changes.outputs.shopify == 'true' || needs.changes.outputs.compose == 'true' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: ./mcp/shopify
+          push: true
+          platforms: linux/arm64
+          tags: |
+            ${{ env.IMAGE_PREFIX }}/shopify:latest
+            ${{ env.IMAGE_PREFIX }}/shopify:${{ github.sha }}
+          cache-from: type=gha,scope=shopify
+          cache-to: type=gha,mode=max,scope=shopify
+
   deploy:
     name: Deploy on EC2 via SSM
-    needs: [build-gateway, build-warehouse, build-meta-ads, build-facebook, build-instagram, build-google-ads, build-ga4, build-gsc]
+    needs: [build-gateway, build-warehouse, build-meta-ads, build-facebook, build-instagram, build-google-ads, build-ga4, build-gsc, build-shopify]
     # Run only if at least one build succeeded. If all builds were skipped
     # (because nothing relevant changed, e.g. workflow-only edit), do not
     # touch the EC2 — there's nothing to deploy.
-    if: ${{ !cancelled() && !failure() && (needs.build-gateway.result == 'success' || needs.build-warehouse.result == 'success' || needs.build-meta-ads.result == 'success' || needs.build-facebook.result == 'success' || needs.build-instagram.result == 'success' || needs.build-google-ads.result == 'success' || needs.build-ga4.result == 'success' || needs.build-gsc.result == 'success') }}
+    if: ${{ !cancelled() && !failure() && (needs.build-gateway.result == 'success' || needs.build-warehouse.result == 'success' || needs.build-meta-ads.result == 'success' || needs.build-facebook.result == 'success' || needs.build-instagram.result == 'success' || needs.build-google-ads.result == 'success' || needs.build-ga4.result == 'success' || needs.build-gsc.result == 'success' || needs.build-shopify.result == 'success') }}
     runs-on: ubuntu-latest
     steps:
       - name: Configure AWS credentials

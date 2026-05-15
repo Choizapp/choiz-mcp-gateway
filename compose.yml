@@ -34,6 +34,8 @@ services:
       UPSTREAM_GA4_TIMELESS: "http://ga4_timeless_mcp:8080"
       UPSTREAM_GSC_CHOIZ: "http://gsc_choiz_mcp:8080"
       UPSTREAM_GSC_TIMELESS: "http://gsc_timeless_mcp:8080"
+      UPSTREAM_SHOPIFY_CHOIZ: "http://shopify_choiz_mcp:8080"
+      UPSTREAM_SHOPIFY_TIMELESS: "http://shopify_timeless_mcp:8080"
       # Remote MCPs proxied through the gateway (no internal container).
       # The route is only registered if the corresponding API key is set;
       # gateway/src/index.ts logs a skip-warning otherwise. See memory
@@ -60,6 +62,8 @@ services:
       - ga4_timeless_mcp
       - gsc_choiz_mcp
       - gsc_timeless_mcp
+      - shopify_choiz_mcp
+      - shopify_timeless_mcp
       - google_ads_mcp
     restart: unless-stopped
 
@@ -219,4 +223,41 @@ services:
       GOOGLE_ADS_OAUTH_REFRESH_TOKEN: ${GOOGLE_ADS_OAUTH_REFRESH_TOKEN:?set GOOGLE_ADS_OAUTH_REFRESH_TOKEN in .env}
       GOOGLE_ADS_DEVELOPER_TOKEN: ${GOOGLE_ADS_DEVELOPER_TOKEN:?set GOOGLE_ADS_DEVELOPER_TOKEN in .env}
       GOOGLE_ADS_LOGIN_CUSTOMER_ID: ${GOOGLE_ADS_LOGIN_CUSTOMER_ID:?set GOOGLE_ADS_LOGIN_CUSTOMER_ID in .env}
+    restart: unless-stopped
+
+  # Shopify MCP — multi-tenant pattern (one image, two services), mirrors
+  # facebook / instagram. Wraps GeLi2001/shopify-mcp's tools/registry but
+  # exposes a READ-ONLY subset (names matching get-*); writes
+  # (create-/update-/delete-/order-cancel/refund-create/inventory-set/...)
+  # are filtered out in mcp/shopify/entrypoint.mjs.
+  #
+  # Architecture: same in-process Node pattern as gsc. No supergateway,
+  # no per-request child churn. McpServer is mounted behind
+  # StreamableHTTPServerTransport on :8080.
+  #
+  # Per-tenant differences: MYSHOPIFY_DOMAIN + SHOPIFY_ACCESS_TOKEN.
+  # The Admin tokens must carry at minimum: read_products, read_orders,
+  # read_customers, read_inventory, read_product_listings,
+  # read_locations, read_price_rules, read_metafields. Missing scopes
+  # surface as opaque 403s from the GraphQL endpoint.
+  #
+  # Payload ceiling caveat: claude.ai rejects MCP tool results above
+  # ~2-3 KB. Shopify `get-orders`/`get-products` responses with full
+  # line items + variants will overshoot — pass `limit` low (≤5) on
+  # list calls. The entrypoint already serializes with compact
+  # JSON.stringify (no indent). If we hit the ceiling in real use, the
+  # next iteration is a field-trimming wrapper similar to the
+  # google-ads MessageToDict filter (see project_mcp_patterns_learned).
+  shopify_choiz_mcp:
+    image: ghcr.io/choizapp/choiz-mcp-gateway/shopify:${IMAGE_TAG:-latest}
+    environment:
+      MYSHOPIFY_DOMAIN: ${SHOPIFY_CHOIZ_DOMAIN:?set SHOPIFY_CHOIZ_DOMAIN in .env}
+      SHOPIFY_ACCESS_TOKEN: ${SHOPIFY_CHOIZ_ACCESS_TOKEN:?set SHOPIFY_CHOIZ_ACCESS_TOKEN in .env}
+    restart: unless-stopped
+
+  shopify_timeless_mcp:
+    image: ghcr.io/choizapp/choiz-mcp-gateway/shopify:${IMAGE_TAG:-latest}
+    environment:
+      MYSHOPIFY_DOMAIN: ${SHOPIFY_TIMELESS_DOMAIN:?set SHOPIFY_TIMELESS_DOMAIN in .env}
+      SHOPIFY_ACCESS_TOKEN: ${SHOPIFY_TIMELESS_ACCESS_TOKEN:?set SHOPIFY_TIMELESS_ACCESS_TOKEN in .env}
     restart: unless-stopped
