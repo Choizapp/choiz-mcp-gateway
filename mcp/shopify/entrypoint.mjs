@@ -95,12 +95,6 @@ console.error("denied (writes):", denied.join(", "));
 // covers wrappers like `{orders: [...], pageInfo: {...}}` correctly —
 // pageInfo's properties are not in TRIM_RULES so they stay.
 const TRIM_RULES = {
-  // get-orders v1 stripped ~10 fields per order; the remaining
-  // top-line money objects (subtotalPrice + totalShippingPrice +
-  // totalTax) plus full customer detail still leave ~500 B per order,
-  // so limit:10 = ~5 KB — above the ceiling. v2 also drops the
-  // redundant money objects (totalPrice is enough for a list view)
-  // and customer subfields the model rarely needs in a list.
   "get-orders": [
     "lineItems",
     "shippingAddress",
@@ -108,14 +102,6 @@ const TRIM_RULES = {
     "taxLines",
     "discountApplications",
     "note",
-    "subtotalPrice",
-    "totalShippingPrice",
-    "totalTax",
-    "phone",
-    "verifiedEmail",
-    "acceptsMarketing",
-    "tags",
-    "createdAt",
   ],
   "get-customer-orders": [
     "lineItems",
@@ -124,57 +110,19 @@ const TRIM_RULES = {
     "taxLines",
     "discountApplications",
     "note",
-    "subtotalPrice",
-    "totalShippingPrice",
-    "totalTax",
   ],
-  // get-products v1 still returned 7-12 KB for limit:5 because
-  // `description` (plaintext, sometimes paragraphs) and
-  // `priceRangeV2` + tags + vendor + handle + productType pile up.
-  // For a list view the model only needs id + title + status.
   "get-products": [
     "variants",
     "images",
     "media",
     "descriptionHtml",
-    "description",
     "options",
     "metafields",
     "seo",
-    "tags",
-    "vendor",
-    "productType",
-    "handle",
-    "totalInventory",
-    "priceRangeV2",
-    "compareAtPriceRange",
-    "onlineStoreUrl",
-    "tracksInventory",
-    "publishedAt",
-    "templateSuffix",
-    "giftCard",
   ],
-  "get-customers": [
-    "addresses",
-    "defaultAddress",
-    "note",
-    "metafields",
-    "phone",
-    "verifiedEmail",
-    "acceptsMarketing",
-    "amountSpent",
-    "lastOrder",
-    "tags",
-  ],
-  "get-collections": [
-    "products",
-    "descriptionHtml",
-    "description",
-    "image",
-    "seo",
-    "ruleSet",
-  ],
-  "get-fulfillment-orders": ["lineItems", "merchantRequests"],
+  "get-customers": ["addresses", "defaultAddress", "note", "metafields"],
+  "get-collections": ["products", "descriptionHtml", "image"],
+  "get-fulfillment-orders": ["lineItems"],
 };
 
 // Runtime telemetry: how many top-level objects had at least one field
