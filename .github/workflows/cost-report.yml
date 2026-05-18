@@ -1,0 +1,221 @@
+name: Cost report
+
+# Read-only AWS Cost Explorer queries for the gateway account. Triggered
+# manually from the Actions UI or `gh workflow run cost-report.yml`.
+# Output goes to the run log AND is uploaded as an artifact for downstream
+# consumption (e.g. piping into an analysis session).
+#
+# IAM: the same OIDC role used by deploy-gateway, plus a `cost-explorer-read`
+# inline policy with read-only `ce:*` + `compute-optimizer:Get*`. See
+# CICD.md → "Cost Explorer read-only".
+#
+# Each `aws ce` request costs $0.01. Typical run = 1 request. Custom mode
+# may issue more if the caller paginates.
+
+on:
+  workflow_dispatch:
+    inputs:
+      report:
+        description: 'Preset report to run'
+        required: true
+        default: 'service-breakdown'
+        type: choice
+        options:
+          - service-breakdown
+          - tag-breakdown
+          - daily-trend
+          - service-by-day
+          - service-by-tag
+          - rightsizing
+          - savings-plans
+          - forecast
+          - custom
+      start_date:
+        description: 'Start date YYYY-MM-DD (inclusive). Default: 30 days ago.'
+        required: false
+        type: string
+      end_date:
+        description: 'End date YYYY-MM-DD (exclusive). Default: today.'
+        required: false
+        type: string
+      granularity:
+        description: 'Granularity for time-series presets'
+        required: false
+        default: 'DAILY'
+        type: choice
+        options:
+          - DAILY
+          - MONTHLY
+      tag_key:
+        description: 'Tag key for tag-breakdown / service-by-tag. Default: Project'
+        required: false
+        default: 'Project'
+        type: string
+      custom_args:
+        description: 'For report=custom: full args appended to "aws ce ..." (no leading "aws ce")'
+        required: false
+        type: string
+
+permissions:
+  id-token: write
+  contents: read
+
+concurrency:
+  group: cost-report
+  cancel-in-progress: false
+
+jobs:
+  report:
+    name: Run Cost Explorer query
+    runs-on: ubuntu-latest
+    steps:
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ secrets.AWS_REGION }}
+
+      - name: Resolve date range
+        id: dates
+        run: |
+          set -euo pipefail
+          END="${{ inputs.end_date }}"
+          START="${{ inputs.start_date }}"
+          [ -z "$END" ] && END=$(date -u +%F)
+          [ -z "$START" ] && START=$(date -u -d "30 days ago" +%F)
+          # Forecast needs a future end date; if asked for forecast and end<=today, bump end +30d.
+          if [ "${{ inputs.report }}" = "forecast" ]; then
+            TODAY=$(date -u +%F)
+            if [ "$END" \< "$TODAY" ] || [ "$END" = "$TODAY" ]; then
+              END=$(date -u -d "+30 days" +%F)
+            fi
+            # Start must be today or later for forecast.
+            if [ "$START" \< "$TODAY" ]; then
+              START=$TODAY
+            fi
+          fi
+          echo "start=$START" >> "$GITHUB_OUTPUT"
+          echo "end=$END" >> "$GITHUB_OUTPUT"
+          echo "Range: $START -> $END (exclusive)"
+
+      - name: Run report
+        env:
+          REPORT: ${{ inputs.report }}
+          START: ${{ steps.dates.outputs.start }}
+          END: ${{ steps.dates.outputs.end }}
+          GRAN: ${{ inputs.granularity }}
+          TAG_KEY: ${{ inputs.tag_key }}
+          CUSTOM: ${{ inputs.custom_args }}
+        run: |
+          set -euo pipefail
+          mkdir -p out
+          OUT="out/${REPORT}.json"
+
+          case "$REPORT" in
+            service-breakdown)
+              aws ce get-cost-and-usage \
+                --time-period "Start=$START,End=$END" \
+                --granularity MONTHLY \
+                --metrics UnblendedCost \
+                --group-by "Type=DIMENSION,Key=SERVICE" \
+                > "$OUT"
+              ;;
+            tag-breakdown)
+              aws ce get-cost-and-usage \
+                --time-period "Start=$START,End=$END" \
+                --granularity MONTHLY \
+                --metrics UnblendedCost \
+                --group-by "Type=TAG,Key=$TAG_KEY" \
+                > "$OUT"
+              ;;
+            daily-trend)
+              aws ce get-cost-and-usage \
+                --time-period "Start=$START,End=$END" \
+                --granularity DAILY \
+                --metrics UnblendedCost \
+                > "$OUT"
+              ;;
+            service-by-day)
+              aws ce get-cost-and-usage \
+                --time-period "Start=$START,End=$END" \
+                --granularity "$GRAN" \
+                --metrics UnblendedCost \
+                --group-by "Type=DIMENSION,Key=SERVICE" \
+                > "$OUT"
+              ;;
+            service-by-tag)
+              # Two group-by dims max per request: service + tag.
+              aws ce get-cost-and-usage \
+                --time-period "Start=$START,End=$END" \
+                --granularity MONTHLY \
+                --metrics UnblendedCost \
+                --group-by "Type=DIMENSION,Key=SERVICE" "Type=TAG,Key=$TAG_KEY" \
+                > "$OUT"
+              ;;
+            rightsizing)
+              # EC2-only per AWS API. Returns "modify" + "terminate" recs.
+              aws ce get-rightsizing-recommendation \
+                --service "AmazonEC2" \
+                --configuration '{"RecommendationTarget":"SAME_INSTANCE_FAMILY","BenefitsConsidered":true}' \
+                > "$OUT"
+              ;;
+            savings-plans)
+              aws ce get-savings-plans-purchase-recommendation \
+                --savings-plans-type COMPUTE_SP \
+                --term-in-years ONE_YEAR \
+                --payment-option NO_UPFRONT \
+                --lookback-period-in-days SIXTY_DAYS \
+                > "$OUT"
+              ;;
+            forecast)
+              aws ce get-cost-forecast \
+                --time-period "Start=$START,End=$END" \
+                --granularity MONTHLY \
+                --metric UNBLENDED_COST \
+                > "$OUT"
+              ;;
+            custom)
+              if [ -z "$CUSTOM" ]; then
+                echo "report=custom requires custom_args" >&2
+                exit 2
+              fi
+              # Word-split is intentional. Trigger is workflow_dispatch (repo
+              # writers only) and the IAM role grants read-only ce:* — so the
+              # blast radius is bounded to Cost Explorer reads. Still, prefer
+              # presets over custom whenever they cover the query.
+              # shellcheck disable=SC2086
+              aws ce $CUSTOM > "$OUT"
+              ;;
+            *)
+              echo "Unknown report: $REPORT" >&2
+              exit 2
+              ;;
+          esac
+
+          SIZE=$(wc -c < "$OUT")
+          echo "Wrote $OUT ($SIZE bytes)"
+
+      - name: Print result
+        run: |
+          set -euo pipefail
+          for f in out/*.json; do
+            echo "::group::$f"
+            # Pretty-print but cap log echo at ~200 KB to keep the UI usable.
+            # Full payload is in the artifact regardless.
+            if [ "$(wc -c < "$f")" -gt 204800 ]; then
+              echo "(truncated for log — full payload in artifact)"
+              head -c 204800 "$f"
+              echo
+              echo "..."
+            else
+              cat "$f"
+            fi
+            echo "::endgroup::"
+          done
+
+      - name: Upload as artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: cost-report-${{ inputs.report }}-${{ github.run_id }}
+          path: out/
+          retention-days: 30
