@@ -104,6 +104,47 @@ If a provider for `token.actions.githubusercontent.com` already exists in this A
 
 5. Copy the **role ARN** — you'll paste it into GitHub as `AWS_ROLE_ARN`.
 
+#### Optional: Cost Explorer read-only
+
+To enable the `cost-report.yml` workflow (Cost Explorer queries from CI), add a second inline policy on the same role:
+
+```json
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "CostExplorerRead",
+      "Effect": "Allow",
+      "Action": [
+        "ce:GetCostAndUsage",
+        "ce:GetCostAndUsageWithResources",
+        "ce:GetCostForecast",
+        "ce:GetDimensionValues",
+        "ce:GetTags",
+        "ce:GetCostCategories",
+        "ce:GetRightsizingRecommendation",
+        "ce:GetSavingsPlansPurchaseRecommendation",
+        "ce:GetReservationPurchaseRecommendation",
+        "ce:GetAnomalies",
+        "ce:GetAnomalyMonitors",
+        "ce:GetAnomalySubscriptions",
+        "ce:DescribeReport",
+        "ce:DescribeNotificationSubscription",
+        "compute-optimizer:GetEC2InstanceRecommendations",
+        "compute-optimizer:GetEBSVolumeRecommendations",
+        "compute-optimizer:GetRecommendationSummaries",
+        "compute-optimizer:GetEnrollmentStatus"
+      ],
+      "Resource": "*"
+    }
+  ]
+}
+```
+
+Save as `cost-explorer-read`. All actions are read-only. Each `ce:*` call costs $0.01 against the AWS billing API; typical run is one request.
+
+If Compute Optimizer was never enabled in the account, the `compute-optimizer:*` calls return an `OptInRequired` error. Enable it once at **Compute Optimizer console → Get started → Opt in** (free).
+
 ### 3. GitHub — secrets and variables
 
 **Settings → Secrets and variables → Actions** on `Choizapp/choiz-mcp-gateway`.
