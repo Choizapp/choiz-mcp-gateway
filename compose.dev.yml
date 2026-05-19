@@ -46,3 +46,7 @@ services:
   shopify_timeless_mcp:
     build: ./mcp/shopify
     image: ghcr.io/choizapp/choiz-mcp-gateway/shopify:dev
+
+  powerbi_mcp:
+    build: ./mcp/powerbi
+    image: ghcr.io/choizapp/choiz-mcp-gateway/powerbi:dev
