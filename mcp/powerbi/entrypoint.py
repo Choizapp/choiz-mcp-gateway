@@ -147,11 +147,24 @@ def _execute_query(dataset_id: str, dax: str) -> list[dict[str, Any]]:
 # streamable_http_path="/" so the gateway can strip /mcp/powerbi and forward
 #   to "/". FastMCP's default is "/mcp" which would force the gateway to
 #   forward /mcp instead of /, leaking the internal path into errors.
+# stateless_http=True so every request creates an ephemeral session. This
+#   sidesteps the post-redeploy "stale Mcp-Session-Id" failure mode
+#   (feedback_stale_session_after_redeploy): the MCP Python SDK returns 400
+#   on unknown session-id when the spec says 404, and claude.ai only
+#   re-initializes on 404. With stateless=True, there is no per-session
+#   state to invalidate — every redeploy is harmless to in-flight chats.
+#   Safe for our surface: 6 stateless tool calls, no resources, no
+#   sampling, no server-to-client notifications. Differs from instagram /
+#   ga4 (which use stateless=False because their session manager is built
+#   manually around lowlevel Server — they have not hit this redeploy
+#   problem yet but are theoretically vulnerable too; revisit if it
+#   surfaces).
 mcp = FastMCP(
     name="powerbi",
     host="0.0.0.0",
     port=8080,
     streamable_http_path="/",
+    stateless_http=True,
 )
 
 
