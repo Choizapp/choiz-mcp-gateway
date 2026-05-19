@@ -1,16 +1,23 @@
-"""Power BI MCP — custom server exposing read-only access to PBI semantic models.
+"""Power BI MCP — read-only access to ONE Power BI semantic model per container.
+
+Single-dataset by design (since 2026-05-19 split): the dataset GUID and brand
+label are pre-configured via env vars (PBI_DATASET_ID + PBI_BRAND). Multi-brand
+deployment uses two containers, one per brand, exposed at /mcp/powerbi-choiz
+and /mcp/powerbi-timeless. This matches the convention used by ga4-choiz /
+ga4-timeless, gsc-choiz / gsc-timeless, etc., and eliminates a class of LLM
+error (picking the wrong `dataset` arg when both models are reachable through
+a single connector).
 
 End users authenticate to claude.ai with Google Workspace. The gateway routes
 their request here; this container talks to Power BI Service using a Service
 Principal (client_credentials), so users never see a Microsoft login prompt.
 
 Tool surface (read-only):
-  - list_datasets()                   : datasets available through this MCP
-  - describe_dataset(dataset)         : tables + descriptions
-  - list_measures(dataset, table?)    : DAX measures
-  - list_columns(dataset, table)      : columns of a table
-  - list_relationships(dataset)       : relationships between tables
-  - query_dax(dataset, dax)           : execute arbitrary DAX
+  - describe_dataset()                : tables + descriptions
+  - list_measures(table?, ...)        : DAX measures with filters
+  - list_columns(table)               : columns of a table
+  - list_relationships()              : relationships between tables
+  - query_dax(dax)                    : execute arbitrary DAX
 
 Discovery (describe_dataset / list_measures / list_columns / list_relationships)
 runs DAX INFO.VIEW.* functions through executeQueries — empirically supported
@@ -20,10 +27,6 @@ Token caching is handled in-process by msal:
   ``ConfidentialClientApplication.acquire_token_for_client`` returns cached
   tokens until ~5 min before expiry and silently re-mints, so each tool
   invocation just calls it without thinking about refresh.
-
-Multi-dataset by slug: PBI_DATASET_CHOIZ + PBI_DATASET_TIMELESS map to the
-"choiz" / "timeless" arg on each tool. The set is closed (validated at startup),
-so the model can't accidentally point at a workspace it shouldn't.
 """
 from __future__ import annotations
 
@@ -47,39 +50,19 @@ TENANT_ID = os.environ["PBI_TENANT_ID"]
 CLIENT_ID = os.environ["PBI_CLIENT_ID"]
 CLIENT_SECRET = os.environ["PBI_CLIENT_SECRET"]
 WORKSPACE_ID = os.environ["PBI_WORKSPACE_ID"]
-
-# Closed slug → dataset GUID mapping. Add a new line + new env var to expose
-# another model; do NOT let users pass arbitrary dataset_ids.
-DATASETS: dict[str, str] = {
-    "choiz":    os.environ["PBI_DATASET_CHOIZ"],
-    "timeless": os.environ["PBI_DATASET_TIMELESS"],
-}
+DATASET_ID = os.environ["PBI_DATASET_ID"]
+# Short label baked into the MCP `name` so claude.ai surfaces it as
+# "powerbi-choiz" / "powerbi-timeless" instead of a generic "powerbi".
+BRAND = os.environ.get("PBI_BRAND", "unknown")
 
 AUTHORITY = f"https://login.microsoftonline.com/{TENANT_ID}"
 SCOPE = ["https://analysis.windows.net/powerbi/api/.default"]
 PBI_BASE = "https://api.powerbi.com/v1.0/myorg"
 
-# Default cap on rows the model can pull in one shot via query_dax. The PBI
-# REST endpoint allows 100K, but a 100K-row response will blow past the
-# claude.ai payload ceiling and waste context. 1000 is a sane default; the
-# model can override per-call if needed.
-DEFAULT_TOP_DEFAULT = 1000
-
 # Single msal app — keeps the token cache across calls.
 _msal_app = msal.ConfidentialClientApplication(
     CLIENT_ID, authority=AUTHORITY, client_credential=CLIENT_SECRET
 )
-
-
-def _resolve_dataset(dataset: str) -> str:
-    """Map slug → GUID, with a useful error if the slug is unknown."""
-    try:
-        return DATASETS[dataset]
-    except KeyError:
-        valid = ", ".join(sorted(DATASETS))
-        raise ValueError(
-            f"unknown dataset {dataset!r}. Valid datasets: {valid}"
-        ) from None
 
 
 def _token() -> str:
@@ -105,14 +88,14 @@ def _strip_brackets(row: dict[str, Any]) -> dict[str, Any]:
     return out
 
 
-def _execute_query(dataset_id: str, dax: str) -> list[dict[str, Any]]:
+def _execute_query(dax: str) -> list[dict[str, Any]]:
     """POST a DAX query to executeQueries and return cleaned rows.
 
     Raises RuntimeError with the PBI error body on non-2xx so the LLM gets
     actionable feedback (bad table name, RLS block, etc).
     """
     url = (
-        f"{PBI_BASE}/groups/{WORKSPACE_ID}/datasets/{dataset_id}/executeQueries"
+        f"{PBI_BASE}/groups/{WORKSPACE_ID}/datasets/{DATASET_ID}/executeQueries"
     )
     body = {
         "queries": [{"query": dax}],
@@ -141,26 +124,21 @@ def _execute_query(dataset_id: str, dax: str) -> list[dict[str, Any]]:
 # --- MCP server -----------------------------------------------------------
 
 # host="0.0.0.0" so the gateway can reach us across the docker bridge with
-#   Host: powerbi_mcp:8080 (changeOrigin: true in http-proxy-middleware).
+#   Host: powerbi_*_mcp:8080 (changeOrigin: true in http-proxy-middleware).
 #   FastMCP otherwise auto-enables DNS rebinding protection that rejects
 #   non-localhost Host headers — same gotcha as warehouse.
-# streamable_http_path="/" so the gateway can strip /mcp/powerbi and forward
-#   to "/". FastMCP's default is "/mcp" which would force the gateway to
-#   forward /mcp instead of /, leaking the internal path into errors.
+# streamable_http_path="/" so the gateway can strip /mcp/powerbi-<brand>
+#   and forward to "/". FastMCP's default is "/mcp" which would force the
+#   gateway to forward /mcp instead of /, leaking the internal path into
+#   errors.
 # stateless_http=True so every request creates an ephemeral session. This
 #   sidesteps the post-redeploy "stale Mcp-Session-Id" failure mode
 #   (feedback_stale_session_after_redeploy): the MCP Python SDK returns 400
 #   on unknown session-id when the spec says 404, and claude.ai only
 #   re-initializes on 404. With stateless=True, there is no per-session
 #   state to invalidate — every redeploy is harmless to in-flight chats.
-#   Safe for our surface: 6 stateless tool calls, no resources, no
-#   sampling, no server-to-client notifications. Differs from instagram /
-#   ga4 (which use stateless=False because their session manager is built
-#   manually around lowlevel Server — they have not hit this redeploy
-#   problem yet but are theoretically vulnerable too; revisit if it
-#   surfaces).
 mcp = FastMCP(
-    name="powerbi",
+    name=f"powerbi-{BRAND}",
     host="0.0.0.0",
     port=8080,
     streamable_http_path="/",
@@ -169,43 +147,24 @@ mcp = FastMCP(
 
 
 @mcp.tool()
-def list_datasets() -> list[dict[str, str]]:
-    """List the Power BI semantic models exposed through this MCP.
-
-    Returns one entry per dataset with `slug` (the value to pass to other
-    tools' `dataset` argument), `name`, and `dataset_id` (the underlying
-    Power BI dataset GUID, for reference).
-
-    Use this first if you are unsure which datasets are available. After
-    that, call `describe_dataset(dataset=<slug>)` to learn the table layout.
-    """
-    return [
-        {"slug": slug, "dataset_id": guid, "workspace_id": WORKSPACE_ID}
-        for slug, guid in DATASETS.items()
-    ]
-
-
-@mcp.tool()
-def describe_dataset(dataset: str, include_hidden: bool = False) -> dict[str, Any]:
-    """List visible tables of a Power BI dataset (name + description only).
+def describe_dataset(include_hidden: bool = False) -> dict[str, Any]:
+    """List visible tables of this brand's Power BI dataset (name + description).
 
     Trimmed by default to stay well under claude.ai's MCP payload ceiling.
     Hidden tables (calculation groups, internal scaffolds) are excluded
     unless `include_hidden=True`. For column detail, call `list_columns`.
     """
-    dataset_id = _resolve_dataset(dataset)
-    rows = _execute_query(dataset_id, "EVALUATE INFO.VIEW.TABLES()")
+    rows = _execute_query("EVALUATE INFO.VIEW.TABLES()")
     tables = [
         {"name": r.get("Name"), "description": r.get("Description")}
         for r in rows
         if include_hidden or not r.get("IsHidden")
     ]
-    return {"dataset": dataset, "tables": tables}
+    return {"brand": BRAND, "tables": tables}
 
 
 @mcp.tool()
 def list_measures(
-    dataset: str,
     table: str | None = None,
     name_contains: str | None = None,
     include_expression: bool = False,
@@ -220,14 +179,12 @@ def list_measures(
     narrow first).
 
     Args:
-      dataset: slug from list_datasets.
       table: optional, restrict to measures whose home table matches.
       name_contains: optional case-insensitive substring filter on measure name.
       include_expression: include the DAX body (default False, heavy field).
       include_hidden: include hidden measures (default False).
     """
-    dataset_id = _resolve_dataset(dataset)
-    rows = _execute_query(dataset_id, "EVALUATE INFO.VIEW.MEASURES()")
+    rows = _execute_query("EVALUATE INFO.VIEW.MEASURES()")
     needle = (name_contains or "").lower()
     measures: list[dict[str, Any]] = []
     for r in rows:
@@ -251,17 +208,14 @@ def list_measures(
 
 
 @mcp.tool()
-def list_columns(
-    dataset: str, table: str, include_hidden: bool = False
-) -> list[dict[str, Any]]:
+def list_columns(table: str, include_hidden: bool = False) -> list[dict[str, Any]]:
     """List columns of a table (name + data_type + is_key + description).
 
     Hidden columns excluded by default. `display_folder` and other less
     useful metadata are dropped to keep the response under the payload
     ceiling.
     """
-    dataset_id = _resolve_dataset(dataset)
-    rows = _execute_query(dataset_id, "EVALUATE INFO.VIEW.COLUMNS()")
+    rows = _execute_query("EVALUATE INFO.VIEW.COLUMNS()")
     return [
         {
             "name": r.get("Name"),
@@ -275,10 +229,9 @@ def list_columns(
 
 
 @mcp.tool()
-def list_relationships(dataset: str) -> list[dict[str, Any]]:
+def list_relationships() -> list[dict[str, Any]]:
     """List active relationships between tables (from_table/column → to_table/column)."""
-    dataset_id = _resolve_dataset(dataset)
-    rows = _execute_query(dataset_id, "EVALUATE INFO.VIEW.RELATIONSHIPS()")
+    rows = _execute_query("EVALUATE INFO.VIEW.RELATIONSHIPS()")
     return [
         {
             "from_table": r.get("FromTable"),
@@ -294,8 +247,8 @@ def list_relationships(dataset: str) -> list[dict[str, Any]]:
 
 
 @mcp.tool()
-def query_dax(dataset: str, dax: str) -> dict[str, Any]:
-    """Execute a DAX query against a Power BI semantic model.
+def query_dax(dax: str) -> dict[str, Any]:
+    """Execute a DAX query against this brand's Power BI semantic model.
 
     The query MUST be a valid DAX statement starting with EVALUATE.
     Prefer measures defined in the model (`list_measures`) over inlining
@@ -310,11 +263,10 @@ def query_dax(dataset: str, dax: str) -> dict[str, Any]:
     big tables before they hit the wire.
 
     Args:
-      dataset: Slug from `list_datasets()`.
-      dax:     DAX query, e.g.
-               `EVALUATE TOPN(10, 'Orders')`
-               `EVALUATE SUMMARIZECOLUMNS('Date'[Year], "Revenue", [Total Revenue])`
-               `EVALUATE FILTER('Customers', 'Customers'[Country] = "MX")`
+      dax: DAX query, e.g.
+           `EVALUATE TOPN(10, 'Orders')`
+           `EVALUATE SUMMARIZECOLUMNS('Date'[Year], "Revenue", [Total Revenue])`
+           `EVALUATE FILTER('Customers', 'Customers'[Country] = "MX")`
 
     Returns:
       dict with `rows` (list of {column_name: value}, brackets stripped) and
@@ -322,8 +274,7 @@ def query_dax(dataset: str, dax: str) -> dict[str, Any]:
       etc.) are surfaced as exceptions with the PBI error body included so
       you can self-correct.
     """
-    dataset_id = _resolve_dataset(dataset)
-    rows = _execute_query(dataset_id, dax)
+    rows = _execute_query(dax)
     return {"rows": rows, "row_count": len(rows)}
 
 
@@ -331,9 +282,10 @@ def main() -> None:
     # Smoke-validate config at startup so a misconfigured container fails
     # fast in `docker logs` instead of erroring on the first user query.
     logger.info(
-        "powerbi mcp starting — workspace=%s, datasets=%s",
+        "powerbi mcp starting — brand=%s, workspace=%s, dataset=%s",
+        BRAND,
         WORKSPACE_ID,
-        ", ".join(DATASETS),
+        DATASET_ID,
     )
     try:
         _token()

@@ -24,10 +24,12 @@ const upstreams: Record<string, string | undefined> = {
   // --stateless gRPC respawn-storms; the official MCP runs in-process under
   // FastMCP so the storm pattern is structurally gone.
   "/mcp/google-ads":         process.env.UPSTREAM_GOOGLE_ADS,
-  // Single Power BI MCP — multi-dataset (Choiz + Timeless) by slug arg, not
-  // per-container per-tenant. Both semantic models live under the same SP +
-  // workspace, so a single container is enough. See compose.yml for rationale.
-  "/mcp/powerbi":            process.env.UPSTREAM_POWERBI,
+  // Power BI MCP — per-brand slug, matches ga4 / gsc / facebook / instagram /
+  // shopify multi-tenant pattern. One container per brand pinned to a single
+  // dataset; tools have no `dataset` argument because the route IS the brand.
+  // The previous single `/mcp/powerbi` route was retired on 2026-05-19.
+  "/mcp/powerbi-choiz":      process.env.UPSTREAM_POWERBI_CHOIZ,
+  "/mcp/powerbi-timeless":   process.env.UPSTREAM_POWERBI_TIMELESS,
 };
 
 // --- Remote MCPs proxied through the gateway (no internal container) ---
