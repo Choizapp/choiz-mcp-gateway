@@ -36,6 +36,7 @@ services:
       UPSTREAM_GSC_TIMELESS: "http://gsc_timeless_mcp:8080"
       UPSTREAM_SHOPIFY_CHOIZ: "http://shopify_choiz_mcp:8080"
       UPSTREAM_SHOPIFY_TIMELESS: "http://shopify_timeless_mcp:8080"
+      UPSTREAM_POWERBI: "http://powerbi_mcp:8080"
       # Remote MCPs proxied through the gateway (no internal container).
       # The route is only registered if the corresponding API key is set;
       # gateway/src/index.ts logs a skip-warning otherwise. See memory
@@ -65,6 +66,7 @@ services:
       - shopify_choiz_mcp
       - shopify_timeless_mcp
       - google_ads_mcp
+      - powerbi_mcp
     restart: unless-stopped
 
   warehouse_mcp:
@@ -260,4 +262,31 @@ services:
     environment:
       MYSHOPIFY_DOMAIN: ${SHOPIFY_TIMELESS_DOMAIN:?set SHOPIFY_TIMELESS_DOMAIN in .env}
       SHOPIFY_ACCESS_TOKEN: ${SHOPIFY_TIMELESS_ACCESS_TOKEN:?set SHOPIFY_TIMELESS_ACCESS_TOKEN in .env}
+    restart: unless-stopped
+
+  # Power BI MCP — single container, multi-dataset (Choiz + Timeless) by slug.
+  #
+  # Diverges from the per-tenant per-container convention (ga4-choiz /
+  # ga4-timeless): both semantic models live under the SAME service principal
+  # in the SAME workspace, so two identical containers would only add memory
+  # cost with no separation benefit. The model passes the slug ("choiz" or
+  # "timeless") as the `dataset` argument on each tool call; PBI_DATASET_*
+  # env vars below map slug → GUID inside the container.
+  #
+  # Auth: Service Principal (client_credentials) — see project_powerbi_mcp_poc_2026-05-19
+  # memory for the POC that validated this path. msal caches the bearer token
+  # in-process and refreshes it silently before the 1-hour TTL, so end users
+  # never see a re-auth prompt.
+  #
+  # Path: /mcp/powerbi/ — single slug, no per-tenant suffix. The LLM picks
+  # the dataset per call.
+  powerbi_mcp:
+    image: ghcr.io/choizapp/choiz-mcp-gateway/powerbi:${IMAGE_TAG:-latest}
+    environment:
+      PBI_TENANT_ID: ${PBI_TENANT_ID:?set PBI_TENANT_ID in .env}
+      PBI_CLIENT_ID: ${PBI_CLIENT_ID:?set PBI_CLIENT_ID in .env}
+      PBI_CLIENT_SECRET: ${PBI_CLIENT_SECRET:?set PBI_CLIENT_SECRET in .env}
+      PBI_WORKSPACE_ID: ${PBI_WORKSPACE_ID:?set PBI_WORKSPACE_ID in .env}
+      PBI_DATASET_CHOIZ: ${PBI_DATASET_CHOIZ:?set PBI_DATASET_CHOIZ in .env}
+      PBI_DATASET_TIMELESS: ${PBI_DATASET_TIMELESS:?set PBI_DATASET_TIMELESS in .env}
     restart: unless-stopped
