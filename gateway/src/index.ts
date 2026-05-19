@@ -30,6 +30,12 @@ const upstreams: Record<string, string | undefined> = {
   // The previous single `/mcp/powerbi` route was retired on 2026-05-19.
   "/mcp/powerbi-choiz":      process.env.UPSTREAM_POWERBI_CHOIZ,
   "/mcp/powerbi-timeless":   process.env.UPSTREAM_POWERBI_TIMELESS,
+  // TikTok Organic MCP — read-only access to a brand's TikTok account
+  // (Display API v2 owned-content). Server-side OAuth via long-lived
+  // refresh_token; end users only see Google Workspace login. Slug-by-brand
+  // for the same reason as powerbi (avoids LLM picking the wrong tenant).
+  // Choiz only at launch; Timeless slot pending Dev Portal app + tokens.
+  "/mcp/tiktok-organic-choiz": process.env.UPSTREAM_TIKTOK_ORGANIC_CHOIZ,
 };
 
 // --- Remote MCPs proxied through the gateway (no internal container) ---

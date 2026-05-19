@@ -38,6 +38,7 @@ services:
       UPSTREAM_SHOPIFY_TIMELESS: "http://shopify_timeless_mcp:8080"
       UPSTREAM_POWERBI_CHOIZ: "http://powerbi_choiz_mcp:8080"
       UPSTREAM_POWERBI_TIMELESS: "http://powerbi_timeless_mcp:8080"
+      UPSTREAM_TIKTOK_ORGANIC_CHOIZ: "http://tiktok_organic_choiz_mcp:8080"
       # Remote MCPs proxied through the gateway (no internal container).
       # The route is only registered if the corresponding API key is set;
       # gateway/src/index.ts logs a skip-warning otherwise. See memory
@@ -69,6 +70,7 @@ services:
       - google_ads_mcp
       - powerbi_choiz_mcp
       - powerbi_timeless_mcp
+      - tiktok_organic_choiz_mcp
     restart: unless-stopped
 
   warehouse_mcp:
@@ -303,4 +305,32 @@ services:
       PBI_WORKSPACE_ID: ${PBI_WORKSPACE_ID:?set PBI_WORKSPACE_ID in .env}
       PBI_DATASET_ID: ${PBI_DATASET_TIMELESS:?set PBI_DATASET_TIMELESS in .env}
       PBI_BRAND: timeless
+    restart: unless-stopped
+
+  # TikTok Organic MCP — multi-tenant-ready (one image, one container per
+  # brand), matches the powerbi / ga4 / facebook / instagram split. Each
+  # container is pinned to a single brand via TIKTOK_BRAND + a long-lived
+  # refresh_token in env; the MCP `name` surfaces as
+  # "tiktok-organic-choiz" in claude.ai so the LLM can't pick the wrong
+  # brand at tool-call time.
+  #
+  # Auth: TikTok Display API v2 OAuth. refresh_token is static (~365-day
+  # TTL, does not rotate on refresh in our experience). access_token is
+  # cached in-process and silently re-minted ~5 min before its 24h
+  # expiry. No tokens.json — the legacy local server's filesystem
+  # persistence is dropped. If the refresh_token expires we re-mint
+  # manually in the Developer Portal and rotate the .env value via SSM.
+  #
+  # Only Choiz at launch (2026-05-19). To add Timeless: register the
+  # Timeless TikTok account in the Dev Portal, mint a refresh_token,
+  # add tiktok_organic_timeless_mcp here + an UPSTREAM_TIKTOK_ORGANIC_TIMELESS
+  # entry in the gateway env + a /mcp/tiktok-organic-timeless route in
+  # gateway/src/index.ts. Container code is brand-agnostic, no rebuild needed.
+  tiktok_organic_choiz_mcp:
+    image: ghcr.io/choizapp/choiz-mcp-gateway/tiktok-organic:${IMAGE_TAG:-latest}
+    environment:
+      TIKTOK_CLIENT_KEY: ${TIKTOK_CHOIZ_CLIENT_KEY:?set TIKTOK_CHOIZ_CLIENT_KEY in .env}
+      TIKTOK_CLIENT_SECRET: ${TIKTOK_CHOIZ_CLIENT_SECRET:?set TIKTOK_CHOIZ_CLIENT_SECRET in .env}
+      TIKTOK_REFRESH_TOKEN: ${TIKTOK_CHOIZ_REFRESH_TOKEN:?set TIKTOK_CHOIZ_REFRESH_TOKEN in .env}
+      TIKTOK_BRAND: choiz
     restart: unless-stopped
