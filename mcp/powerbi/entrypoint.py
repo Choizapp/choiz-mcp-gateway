@@ -173,114 +173,97 @@ def list_datasets() -> list[dict[str, str]]:
 
 
 @mcp.tool()
-def describe_dataset(dataset: str) -> dict[str, Any]:
-    """List all visible tables in a Power BI dataset, with their descriptions.
+def describe_dataset(dataset: str, include_hidden: bool = False) -> dict[str, Any]:
+    """List visible tables of a Power BI dataset (name + description only).
 
-    The model authors documented each table in the semantic model itself
-    (Description property). This tool surfaces that documentation so the
-    LLM can pick the right table before writing DAX.
-
-    Args:
-      dataset: Slug from `list_datasets()` (e.g. "choiz" or "timeless").
-
-    Returns:
-      dict with `dataset` (echoed slug) and `tables` — a list of
-      {name, description, is_hidden, data_category, calculation_group_precedence}.
-      Hidden tables are returned but flagged; the LLM should generally avoid
-      querying them directly.
+    Trimmed by default to stay well under claude.ai's MCP payload ceiling.
+    Hidden tables (calculation groups, internal scaffolds) are excluded
+    unless `include_hidden=True`. For column detail, call `list_columns`.
     """
     dataset_id = _resolve_dataset(dataset)
     rows = _execute_query(dataset_id, "EVALUATE INFO.VIEW.TABLES()")
     tables = [
-        {
-            "name": r.get("Name"),
-            "description": r.get("Description"),
-            "is_hidden": r.get("IsHidden"),
-            "data_category": r.get("DataCategory"),
-            "calculation_group_precedence": r.get("CalculationGroupPrecedence"),
-        }
+        {"name": r.get("Name"), "description": r.get("Description")}
         for r in rows
+        if include_hidden or not r.get("IsHidden")
     ]
     return {"dataset": dataset, "tables": tables}
 
 
 @mcp.tool()
-def list_measures(dataset: str, table: str | None = None) -> list[dict[str, Any]]:
-    """List DAX measures defined in a Power BI dataset.
+def list_measures(
+    dataset: str,
+    table: str | None = None,
+    name_contains: str | None = None,
+    include_expression: bool = False,
+    include_hidden: bool = False,
+) -> list[dict[str, Any]]:
+    """List DAX measures (name + table + description + folder).
+
+    DAX expression body is omitted by default — it's the heaviest field
+    and blows past claude.ai's payload ceiling for models with many
+    measures. Pass `include_expression=True` only when you need to inspect
+    the formula of a specific measure (combine with `name_contains` to
+    narrow first).
 
     Args:
-      dataset: Slug from `list_datasets()` (e.g. "choiz" or "timeless").
-      table:   Optional. If provided, returns only measures whose home table
-               matches this name (case-sensitive, as stored in the model).
-
-    Returns:
-      List of {name, table, description, display_folder, expression, is_hidden}.
-      `expression` is the DAX body of the measure — useful when the LLM
-      needs to compose a derived calculation or understand semantics.
+      dataset: slug from list_datasets.
+      table: optional, restrict to measures whose home table matches.
+      name_contains: optional case-insensitive substring filter on measure name.
+      include_expression: include the DAX body (default False, heavy field).
+      include_hidden: include hidden measures (default False).
     """
     dataset_id = _resolve_dataset(dataset)
     rows = _execute_query(dataset_id, "EVALUATE INFO.VIEW.MEASURES()")
-    measures = [
-        {
-            "name": r.get("Name"),
+    needle = (name_contains or "").lower()
+    measures: list[dict[str, Any]] = []
+    for r in rows:
+        if not include_hidden and r.get("IsHidden"):
+            continue
+        if table is not None and r.get("Table") != table:
+            continue
+        name = r.get("Name") or ""
+        if needle and needle not in name.lower():
+            continue
+        m: dict[str, Any] = {
+            "name": name,
             "table": r.get("Table"),
             "description": r.get("Description"),
             "display_folder": r.get("DisplayFolder"),
-            "expression": r.get("Expression"),
-            "is_hidden": r.get("IsHidden"),
         }
-        for r in rows
-    ]
-    if table is not None:
-        measures = [m for m in measures if m["table"] == table]
+        if include_expression:
+            m["expression"] = r.get("Expression")
+        measures.append(m)
     return measures
 
 
 @mcp.tool()
-def list_columns(dataset: str, table: str) -> list[dict[str, Any]]:
-    """List columns of a specific table in a Power BI dataset.
+def list_columns(
+    dataset: str, table: str, include_hidden: bool = False
+) -> list[dict[str, Any]]:
+    """List columns of a table (name + data_type + is_key + description).
 
-    Args:
-      dataset: Slug from `list_datasets()`.
-      table:   Table name (case-sensitive, exactly as returned by
-               `describe_dataset`).
-
-    Returns:
-      List of {name, table, data_type, is_hidden, is_key, description,
-      display_folder}.
+    Hidden columns excluded by default. `display_folder` and other less
+    useful metadata are dropped to keep the response under the payload
+    ceiling.
     """
     dataset_id = _resolve_dataset(dataset)
     rows = _execute_query(dataset_id, "EVALUATE INFO.VIEW.COLUMNS()")
-    columns = [
+    return [
         {
             "name": r.get("Name"),
-            "table": r.get("Table"),
             "data_type": r.get("DataType"),
-            "is_hidden": r.get("IsHidden"),
             "is_key": r.get("IsKey"),
             "description": r.get("Description"),
-            "display_folder": r.get("DisplayFolder"),
         }
         for r in rows
-        if r.get("Table") == table
+        if r.get("Table") == table and (include_hidden or not r.get("IsHidden"))
     ]
-    return columns
 
 
 @mcp.tool()
 def list_relationships(dataset: str) -> list[dict[str, Any]]:
-    """List relationships between tables in a Power BI dataset.
-
-    Useful for understanding which tables can be joined implicitly via
-    DAX and which direction the cross-filter flows.
-
-    Args:
-      dataset: Slug from `list_datasets()`.
-
-    Returns:
-      List of {from_table, from_column, to_table, to_column, is_active,
-      cross_filtering_behavior, relationship_type}.
-    """
+    """List active relationships between tables (from_table/column → to_table/column)."""
     dataset_id = _resolve_dataset(dataset)
     rows = _execute_query(dataset_id, "EVALUATE INFO.VIEW.RELATIONSHIPS()")
     return [
