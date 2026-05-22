@@ -43,7 +43,10 @@ services:
       # The route is only registered if the corresponding API key is set;
       # gateway/src/index.ts logs a skip-warning otherwise. See memory
       # project_wrap_remote_mcps + the remoteUpstreams table in index.ts.
-      KAPSO_API_KEY: ${KAPSO_API_KEY:-}
+      KAPSO_API_KEY_CHOIZ_SALES:      ${KAPSO_API_KEY_CHOIZ_SALES:-}
+      KAPSO_API_KEY_CHOIZ_SUPPORT:    ${KAPSO_API_KEY_CHOIZ_SUPPORT:-}
+      KAPSO_API_KEY_TIMELESS_SALES:   ${KAPSO_API_KEY_TIMELESS_SALES:-}
+      KAPSO_API_KEY_TIMELESS_SUPPORT: ${KAPSO_API_KEY_TIMELESS_SUPPORT:-}
       # Re-enabled 2026-05-07: cutover to the official googleads/google-ads-mcp
       # eliminates supergateway --stateless, so the original tunnel-zombie
       # trigger (per-request gRPC channel storm to googleads.googleapis.com)
