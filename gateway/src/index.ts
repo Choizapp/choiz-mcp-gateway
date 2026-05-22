@@ -51,9 +51,27 @@ interface RemoteUpstream {
   apiKeyHeader: string; // header name to set on the outgoing request
 }
 const remoteUpstreams: Record<string, RemoteUpstream> = {
-  "/mcp/kapso": {
+  // Kapso is project-scoped: one API key = one project. We expose one slug
+  // per project (choiz/timeless × sales/support). The OTP project that
+  // originally backed `/mcp/kapso` was retired 2026-05-22.
+  "/mcp/kapso-choiz-sales": {
     target: "https://app.kapso.ai/mcp",
-    apiKeyEnv: "KAPSO_API_KEY",
+    apiKeyEnv: "KAPSO_API_KEY_CHOIZ_SALES",
+    apiKeyHeader: "x-api-key",
+  },
+  "/mcp/kapso-choiz-support": {
+    target: "https://app.kapso.ai/mcp",
+    apiKeyEnv: "KAPSO_API_KEY_CHOIZ_SUPPORT",
+    apiKeyHeader: "x-api-key",
+  },
+  "/mcp/kapso-timeless-sales": {
+    target: "https://app.kapso.ai/mcp",
+    apiKeyEnv: "KAPSO_API_KEY_TIMELESS_SALES",
+    apiKeyHeader: "x-api-key",
+  },
+  "/mcp/kapso-timeless-support": {
+    target: "https://app.kapso.ai/mcp",
+    apiKeyEnv: "KAPSO_API_KEY_TIMELESS_SUPPORT",
     apiKeyHeader: "x-api-key",
   },
 };
