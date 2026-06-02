@@ -36,6 +36,11 @@ const upstreams: Record<string, string | undefined> = {
   // for the same reason as powerbi (avoids LLM picking the wrong tenant).
   // Choiz only at launch; Timeless slot pending Dev Portal app + tokens.
   "/mcp/tiktok-organic-choiz": process.env.UPSTREAM_TIKTOK_ORGANIC_CHOIZ,
+  // DHL Express MCP — single tenant. Tracking (read) + label/return generation
+  // (WRITE) via the MyDHL API. The only write-capable MCP in the gateway; the
+  // /mcp auth guard above is its sole access barrier. Server-side HTTP Basic
+  // auth to DHL; end users only see Google Workspace login.
+  "/mcp/dhl":                  process.env.UPSTREAM_DHL,
 };
 
 // --- Remote MCPs proxied through the gateway (no internal container) ---

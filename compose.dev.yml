@@ -54,3 +54,7 @@ services:
   powerbi_timeless_mcp:
     build: ./mcp/powerbi
     image: ghcr.io/choizapp/choiz-mcp-gateway/powerbi:dev
+
+  dhl_mcp:
+    build: ./mcp/dhl
+    image: ghcr.io/choizapp/choiz-mcp-gateway/dhl:dev
