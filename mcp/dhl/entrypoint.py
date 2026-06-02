@@ -70,8 +70,11 @@ API_SECRET = os.environ["DHL_API_SECRET"]
 # Default to the MyDHL TEST base. Flip to production
 # (https://express.api.dhl.com/mydhlapi) deliberately in the EC2 .env once
 # create-shipment payloads are validated — see the module docstring.
-BASE_URL = os.environ.get(
-    "DHL_BASE_URL", "https://express.api.dhl.com/mydhlapi/test"
+# NB: compose passes DHL_BASE_URL=${DHL_BASE_URL:-}, i.e. the var is present
+# but EMPTY when unset. os.environ.get(..., default) does NOT fall back on an
+# empty string (the key exists), so use `or` to treat "" as "use the default".
+BASE_URL = (
+    os.environ.get("DHL_BASE_URL") or "https://express.api.dhl.com/mydhlapi/test"
 ).rstrip("/")
 # Optional: DHL Express account number. Most MyDHL calls carry the account in
 # the request body (`accounts`), so this is only used as a convenience default
