@@ -39,6 +39,7 @@ services:
       UPSTREAM_POWERBI_CHOIZ: "http://powerbi_choiz_mcp:8080"
       UPSTREAM_POWERBI_TIMELESS: "http://powerbi_timeless_mcp:8080"
       UPSTREAM_TIKTOK_ORGANIC_CHOIZ: "http://tiktok_organic_choiz_mcp:8080"
+      UPSTREAM_DHL: "http://dhl_mcp:8080"
       # Remote MCPs proxied through the gateway (no internal container).
       # The route is only registered if the corresponding API key is set;
       # gateway/src/index.ts logs a skip-warning otherwise. See memory
@@ -74,6 +75,7 @@ services:
       - powerbi_choiz_mcp
       - powerbi_timeless_mcp
       - tiktok_organic_choiz_mcp
+      - dhl_mcp
     restart: unless-stopped
 
   warehouse_mcp:
@@ -336,4 +338,31 @@ services:
       TIKTOK_CLIENT_SECRET: ${TIKTOK_CHOIZ_CLIENT_SECRET:?set TIKTOK_CHOIZ_CLIENT_SECRET in .env}
       TIKTOK_REFRESH_TOKEN: ${TIKTOK_CHOIZ_REFRESH_TOKEN:?set TIKTOK_CHOIZ_REFRESH_TOKEN in .env}
       TIKTOK_BRAND: choiz
+    restart: unless-stopped
+
+  # DHL Express MCP — single tenant (one DHL Express account). Custom FastMCP
+  # server (mcp/dhl/entrypoint.py) wrapping the MyDHL API over HTTP Basic auth.
+  # Mirrors the tiktok-organic shape: requests + stateless_http, no SDK.
+  #
+  # WRITE-CAPABLE — unlike every other MCP here. create_shipment /
+  # create_return_shipment generate real labels and can bill the DHL account.
+  # Two guards: (1) the gateway auth chain is the only way in; (2) DHL_BASE_URL
+  # defaults to the MyDHL *test* base inside the entrypoint, so production
+  # bookings only happen when DHL_BASE_URL is explicitly set to the production
+  # base below. Leave DHL_BASE_URL unset (test) until create-shipment payloads
+  # are validated.
+  #
+  # Auth: DHL_API_KEY + DHL_API_SECRET (developer-portal app bound to the DHL
+  # Express account) → static Basic header, no token refresh.
+  dhl_mcp:
+    image: ghcr.io/choizapp/choiz-mcp-gateway/dhl:${IMAGE_TAG:-latest}
+    environment:
+      DHL_API_KEY: ${DHL_API_KEY:?set DHL_API_KEY in .env}
+      DHL_API_SECRET: ${DHL_API_SECRET:?set DHL_API_SECRET in .env}
+      # Optional. Unset = MyDHL test base (safe default). Set to
+      # https://express.api.dhl.com/mydhlapi for production.
+      DHL_BASE_URL: ${DHL_BASE_URL:-}
+      # Optional convenience default; the DHL account number normally travels
+      # in the shipment body's `accounts`, not as a header.
+      DHL_ACCOUNT_NUMBER: ${DHL_ACCOUNT_NUMBER:-}
     restart: unless-stopped
