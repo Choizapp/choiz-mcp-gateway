@@ -185,8 +185,11 @@ if (dhlDownloadTarget) {
     createProxyMiddleware({
       target: dhlDownloadTarget,
       changeOrigin: true,
-      // /dl/dhl/<token> -> /download/<token> on the MCP container.
-      pathRewrite: { "^/dl/dhl": "/download" },
+      // Express strips the "/dl/dhl" mount prefix before the proxy runs, so
+      // pathRewrite sees the already-stripped "/<token>". Rewrite the leading
+      // slash to "/download/" so the MCP receives /download/<token>.
+      // (A "^/dl/dhl" rewrite would be a no-op — the prefix is already gone.)
+      pathRewrite: { "^/": "/download/" },
       selfHandleResponse: false,
       on: {
         proxyReq: (proxyReq) => {
