@@ -32,8 +32,7 @@ export interface AuthenticatedUser {
  * so a leaked shared secret cannot be used to inject arbitrary identities.
  */
 export function authenticate(req: Request): AuthenticatedUser | null {
-  const secret = req.header("x-worker-shared-secret");
-  if (secret !== SHARED_SECRET) return null;
+  if (!workerSecretOk(req)) return null;
 
   const email = req.header("x-choiz-user-email");
   if (!email) return null;
@@ -41,4 +40,14 @@ export function authenticate(req: Request): AuthenticatedUser | null {
   if (!ALLOWED_DOMAINS.includes(domain)) return null;
 
   return { email };
+}
+
+/**
+ * Lighter check for non-/mcp paths (e.g. the public label download proxy):
+ * confirms the request came from the Worker via the shared secret, WITHOUT
+ * requiring a user email. Used where the capability token in the URL is the
+ * actual authorization (the Worker forwards browser GETs that carry no bearer).
+ */
+export function workerSecretOk(req: Request): boolean {
+  return req.header("x-worker-shared-secret") === SHARED_SECRET;
 }

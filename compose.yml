@@ -365,4 +365,10 @@ services:
       # Optional convenience default; the DHL account number normally travels
       # in the shipment body's `accounts`, not as a header.
       DHL_ACCOUNT_NUMBER: ${DHL_ACCOUNT_NUMBER:-}
+      # Label downloads: the MCP stashes generated label PDFs in-memory and
+      # returns a browser-openable link under this base. The gateway proxies
+      # /dl/dhl/<token> -> this container's /download/<token>; the Worker
+      # exposes it publicly (token is the capability). TTL in minutes.
+      LABEL_DOWNLOAD_BASE_URL: ${LABEL_DOWNLOAD_BASE_URL:-https://mcp.choiz.com.mx/dl/dhl}
+      LABEL_TTL_MINUTES: ${LABEL_TTL_MINUTES:-30}
     restart: unless-stopped

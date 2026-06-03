@@ -29,19 +29,24 @@ Tool surface:
     - create_shipment(payload)               : POST /shipments  -> tracking + label
     - create_return_shipment(payload)        : POST /shipments (return product) -> tracking + label
 
-Payload-ceiling discipline (see project_claudeai_payload_ceiling + ADDING_AN_MCP):
+Label delivery (see project_claudeai_payload_ceiling + ADDING_AN_MCP):
   A MyDHL label PDF returned as base64 is tens of KB — far past whatever
   claude.ai can carry back through the MCP tool-result channel. Returning it
-  inline HANGS the claude.ai session (confirmed in prod 2026-06-02: a real
-  create_shipment call left the UI spinning forever). MyDHL Express returns
-  labels ONLY as base64 (the URL-reference output is a Parcel DE / eCommerce
-  feature, not Express), so there is no DHL-hosted link to hand back.
+  inline HANGS the claude.ai session (confirmed in prod 2026-06-02). MyDHL
+  Express returns labels ONLY as base64 (the URL-reference output is a Parcel
+  DE / eCommerce feature, not Express), so there is no DHL-hosted link to hand
+  back.
 
-  Therefore _trim_documents() ALWAYS strips the base64 `content` — there is no
-  opt-in to return it through claude.ai. The shipment + label ARE created on
-  DHL's side; create_shipment returns the tracking number + document metadata
-  + a note on how to retrieve the actual PDF (MyDHL+ portal today; a
-  gateway-hosted download link is the planned follow-up).
+  So instead of inlining the base64, _externalize_documents() decodes each
+  document, stashes the bytes in an in-process TTL store, and replaces
+  `content` with a short `download_url`. That URL points at this container's
+  GET /download/{token} route, exposed publicly (browser-openable, no MCP
+  bearer) through the gateway + Worker at LABEL_DOWNLOAD_BASE_URL
+  (https://mcp.choiz.com.mx/dl/dhl/<token>). The model hands the user the link;
+  the PDF never transits the claude.ai tool-result channel. The store is
+  in-memory only (lost on container restart) and entries expire after
+  LABEL_TTL_MINUTES — labels are ephemeral; regenerate or use the MyDHL+ portal
+  if a link has expired.
 
 The MyDHL shipment body is large and account-specific (~hundreds of fields:
 shipper/receiver accounts, productCode, packages, customs, value-added
@@ -56,11 +61,16 @@ import base64
 import json
 import logging
 import os
+import secrets
+import threading
+import time
 import uuid
 from typing import Any
 
 import requests
 from mcp.server.fastmcp import FastMCP
+from starlette.requests import Request
+from starlette.responses import Response
 
 logger = logging.getLogger("dhl_mcp")
 logging.basicConfig(
@@ -90,9 +100,81 @@ _AUTH_HEADER = "Basic " + base64.b64encode(
     f"{API_KEY}:{API_SECRET}".encode()
 ).decode()
 
-# Truncate any base64 document content longer than this before returning it
-# to the model, to stay under claude.ai's payload ceiling.
+# Any base64 document content longer than this gets externalized to a
+# download link instead of returned inline (claude.ai payload ceiling).
 _MAX_DOC_CONTENT_CHARS = 256
+
+# Public base for browser-openable label download links. The MCP builds
+# f"{LABEL_DOWNLOAD_BASE_URL}/{token}"; the gateway proxies /dl/dhl/<token> to
+# this container's GET /download/<token>. Empty disables externalization
+# (falls back to an omitted-content stub).
+LABEL_DOWNLOAD_BASE_URL = (
+    os.environ.get("LABEL_DOWNLOAD_BASE_URL") or "https://mcp.choiz.com.mx/dl/dhl"
+).rstrip("/")
+try:
+    LABEL_TTL_MINUTES = int(os.environ.get("LABEL_TTL_MINUTES") or "30")
+except ValueError:
+    LABEL_TTL_MINUTES = 30
+# Cap stored labels so a burst can't grow the container unbounded
+# (~200 * ~100 KB ≈ 20 MB worst case). Oldest-by-expiry evicted past this.
+_MAX_LABELS = 200
+
+
+# --- In-memory label store (TTL, thread-safe) -----------------------------
+#
+# token -> {pdf: bytes, filename: str, content_type: str, expires_at: float}.
+# In-process only: a container restart drops all links (acceptable — labels
+# are ephemeral). Accessed from sync tool calls (anyio worker thread) and the
+# async /download route, so guard with a plain Lock.
+
+_label_lock = threading.Lock()
+_label_store: dict[str, dict[str, Any]] = {}
+
+_FORMAT_CONTENT_TYPE = {"PDF": "application/pdf", "PNG": "image/png"}
+
+
+def _doc_content_type(image_format: str | None) -> str:
+    return _FORMAT_CONTENT_TYPE.get((image_format or "").upper(), "application/octet-stream")
+
+
+def _doc_ext(image_format: str | None) -> str:
+    f = (image_format or "").lower()
+    return f if f in ("pdf", "zpl", "png", "epl", "lp2") else "bin"
+
+
+def _store_label(pdf: bytes, filename: str, content_type: str) -> str:
+    """Stash a decoded document under a fresh unguessable token. Returns the token."""
+    token = secrets.token_urlsafe(24)  # ~192 bits
+    now = time.time()
+    with _label_lock:
+        # Purge expired, then enforce the cap by evicting the soonest-to-expire.
+        for t in [t for t, e in _label_store.items() if e["expires_at"] <= now]:
+            _label_store.pop(t, None)
+        if len(_label_store) >= _MAX_LABELS:
+            for t in sorted(_label_store, key=lambda t: _label_store[t]["expires_at"])[
+                : len(_label_store) - _MAX_LABELS + 1
+            ]:
+                _label_store.pop(t, None)
+        _label_store[token] = {
+            "pdf": pdf,
+            "filename": filename,
+            "content_type": content_type,
+            "expires_at": now + LABEL_TTL_MINUTES * 60,
+        }
+    return token
+
+
+def _get_label(token: str) -> dict[str, Any] | None:
+    """Return a non-expired stored label, or None (also drops it if expired)."""
+    now = time.time()
+    with _label_lock:
+        entry = _label_store.get(token)
+        if entry is None:
+            return None
+        if entry["expires_at"] <= now:
+            _label_store.pop(token, None)
+            return None
+        return entry
 
 
 # --- HTTP helper ----------------------------------------------------------
@@ -137,40 +219,53 @@ def _request(
     )
 
 
-def _trim_documents(data: dict[str, Any]) -> dict[str, Any]:
-    """Always strip heavy base64 label content out of a shipment response.
+def _externalize_documents(data: dict[str, Any]) -> dict[str, Any]:
+    """Replace each base64 `documents[].content` with a short download_url.
 
     MyDHL returns created labels/invoices under `documents[].content` as base64.
-    Returned inline they hang the claude.ai session (no opt-in to send them
-    through — there is no payload size that is reliably safe, and Express has no
-    URL-reference alternative). Replace each base64 `content` with a small
-    metadata stub. Mutates a shallow copy and returns it.
+    Returned inline they hang the claude.ai session. Decode each, stash the
+    bytes in the TTL store, and swap `content` for a browser-openable link
+    (built from LABEL_DOWNLOAD_BASE_URL). If externalization is disabled or the
+    base64 fails to decode, fall back to an omitted-content stub. Returns a
+    shallow copy.
     """
     if not isinstance(data, dict):
         return data
     docs = data.get("documents")
-    if isinstance(docs, list):
-        trimmed = []
-        for doc in docs:
-            if not isinstance(doc, dict):
-                trimmed.append(doc)
-                continue
-            d = dict(doc)
-            content = d.get("content")
-            if isinstance(content, str) and len(content) > _MAX_DOC_CONTENT_CHARS:
+    if not isinstance(docs, list):
+        return data
+    tracking = data.get("shipmentTrackingNumber") or ""
+    new_docs: list[Any] = []
+    for doc in docs:
+        if not isinstance(doc, dict):
+            new_docs.append(doc)
+            continue
+        d = dict(doc)
+        content = d.get("content")
+        if isinstance(content, str) and len(content) > _MAX_DOC_CONTENT_CHARS:
+            type_code = d.get("typeCode") or "document"
+            image_format = d.get("imageFormat")
+            try:
+                pdf_bytes = base64.b64decode(content)
+            except Exception:  # malformed base64 — never inline it
+                pdf_bytes = None
+            if pdf_bytes and LABEL_DOWNLOAD_BASE_URL:
+                filename = f"{type_code}-{tracking or 'dhl'}.{_doc_ext(image_format)}"
+                token = _store_label(pdf_bytes, filename, _doc_content_type(image_format))
+                d["content"] = {
+                    "download_url": f"{LABEL_DOWNLOAD_BASE_URL}/{token}",
+                    "expires_in_minutes": LABEL_TTL_MINUTES,
+                    "filename": filename,
+                }
+            else:
                 d["content"] = {
                     "omitted": True,
                     "base64_length": len(content),
-                    "note": (
-                        "Label base64 omitted — returning it through claude.ai "
-                        "hangs the session. The label WAS generated on DHL's "
-                        "side; retrieve the PDF from the MyDHL+ portal using the "
-                        "tracking number (a gateway-hosted download link is planned)."
-                    ),
+                    "note": "Label withheld; retrieve from the MyDHL+ portal via the tracking number.",
                 }
-            trimmed.append(d)
-        data = dict(data)
-        data["documents"] = trimmed
+        new_docs.append(d)
+    data = dict(data)
+    data["documents"] = new_docs
     return data
 
 
@@ -186,6 +281,24 @@ mcp = FastMCP(
     streamable_http_path="/",
     stateless_http=True,
 )
+
+
+@mcp.custom_route("/download/{token}", methods=["GET"])
+async def download_label(request: Request) -> Response:
+    """Serve a stored label/document by token as a browser download.
+
+    Reached publicly (no MCP bearer) via the gateway + Worker:
+    https://mcp.choiz.com.mx/dl/dhl/<token> -> gateway /dl/dhl -> here. The
+    token is the capability; unknown/expired -> 404.
+    """
+    entry = _get_label(request.path_params.get("token", ""))
+    if entry is None:
+        return Response("Label not found or expired.", status_code=404, media_type="text/plain")
+    return Response(
+        content=entry["pdf"],
+        media_type=entry["content_type"],
+        headers={"Content-Disposition": f'attachment; filename="{entry["filename"]}"'},
+    )
 
 
 @mcp.tool()
@@ -237,14 +350,14 @@ def get_rates(payload: dict[str, Any]) -> dict[str, Any]:
     return _request("POST", "/rates", body=payload)
 
 
-# Guidance attached to every create response so the model never tries to pull
-# the (stripped) base64 label — doing so is what hangs claude.ai.
+# Guidance attached to every create response. Steers the model to hand the
+# user the download link instead of trying to fetch/decode the label (which
+# would pull the base64 back and hang claude.ai).
 _LABEL_NOTE = (
-    "Shipment created on DHL's side. The label PDF is intentionally NOT returned "
-    "here: a base64 label hangs the claude.ai session, and MyDHL Express offers "
-    "no URL alternative. Do NOT attempt to fetch or decode the label content. "
-    "Retrieve the PDF from the MyDHL+ portal using the tracking number above "
-    "(a gateway-hosted download link is the planned follow-up)."
+    "Shipment created. The label is NOT inlined (a base64 label hangs claude.ai). "
+    "Each entry under documents[].content.download_url is a browser link to "
+    f"download the PDF, valid for {LABEL_TTL_MINUTES} minutes. Give the user that "
+    "link directly — do NOT fetch or decode the label yourself."
 )
 
 
@@ -269,13 +382,14 @@ def create_shipment(payload: dict[str, Any]) -> dict[str, Any]:
         "content": {"packages": [...], "isCustomsDeclarable": false, ...}
       }
 
-    LABEL: the generated label comes back from DHL as base64 and is ALWAYS
-    stripped here — returning it through claude.ai hangs the session and there
-    is no opt-in to send it. The tracking number is returned; fetch the actual
-    PDF out-of-band (MyDHL+ portal). Do not try to retrieve/decode the label.
+    LABEL: the generated label comes back from DHL as base64; it is NEVER
+    inlined (that hangs claude.ai). Instead each document is stashed and
+    documents[].content is replaced with a `download_url` — a browser link the
+    user opens to download the PDF (valid LABEL_TTL_MINUTES). Hand the user that
+    link; do not fetch or decode the label yourself.
     """
     data = _request("POST", "/shipments", body=payload)
-    out = _trim_documents(data)
+    out = _externalize_documents(data)
     if isinstance(out, dict):
         out["_label_note"] = _LABEL_NOTE
     return out
@@ -291,11 +405,11 @@ def create_return_shipment(payload: dict[str, Any]) -> dict[str, Any]:
     Express account (paperless return vs printed return label) in `payload`.
 
     Same billing + TEST/production caveats and same label handling as
-    create_shipment (base64 label always stripped; retrieve out-of-band). See
+    create_shipment (label externalized to a download_url; never inlined). See
     the MyDHL API reference for the return body schema.
     """
     data = _request("POST", "/shipments", body=payload)
-    out = _trim_documents(data)
+    out = _externalize_documents(data)
     if isinstance(out, dict):
         out["_label_note"] = _LABEL_NOTE
     return out
