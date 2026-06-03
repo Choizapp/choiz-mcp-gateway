@@ -144,6 +144,32 @@ app.get("/callback", async (c) => {
 });
 
 /**
+ * Public DHL label download proxy.
+ *
+ * Lives here (NOT under /mcp/) so the OAuthProvider hands it to us with NO
+ * bearer required — a browser opening the link has no MCP token. The
+ * unguessable token in the path (issued by the dhl MCP, ~192 bits, short TTL)
+ * IS the capability. We validate its shape, forward the GET to the gateway
+ * with the shared secret, and stream the PDF straight back to the browser.
+ */
+app.get("/dl/dhl/:token", async (c) => {
+  const token = c.req.param("token");
+  if (!/^[A-Za-z0-9_-]{16,64}$/.test(token)) {
+    return c.text("Bad token", 400);
+  }
+  const upstream = await fetch(`${c.env.UPSTREAM_BASE}/dl/dhl/${token}`, {
+    headers: { "x-worker-shared-secret": c.env.WORKER_SHARED_SECRET },
+  });
+  // Pass through status + the headers a browser download needs.
+  const headers = new Headers();
+  for (const h of ["content-type", "content-disposition", "content-length"]) {
+    const v = upstream.headers.get(h);
+    if (v) headers.set(h, v);
+  }
+  return new Response(upstream.body, { status: upstream.status, headers });
+});
+
+/**
  * Health + sanity page. Not required by the OAuth flow, just handy.
  */
 app.get("/", (c) => {

@@ -1,6 +1,6 @@
 import express from "express";
 import { createProxyMiddleware } from "http-proxy-middleware";
-import { authenticate } from "./auth.js";
+import { authenticate, workerSecretOk } from "./auth.js";
 
 const app = express();
 
@@ -155,6 +155,48 @@ for (const [prefix, cfg] of Object.entries(remoteUpstreams)) {
         },
         error: (err, _req, res) => {
           console.error(`[proxy:${prefix}] upstream error`, err);
+          if (res && "writeHead" in res && !res.headersSent) {
+            res.writeHead(502, { "Content-Type": "application/json" });
+            res.end(JSON.stringify({ error: "upstream_unavailable" }));
+          }
+        },
+      },
+    }),
+  );
+}
+
+// --- DHL label download (public capability URL, NOT under /mcp auth) ---
+// Browser GET mcp.choiz.com.mx/dl/dhl/<token> -> Worker (DefaultHandler, no
+// bearer) -> here. The unguessable token in the path is the authorization; we
+// only verify the request came from the Worker (shared secret), then proxy to
+// the dhl MCP container's GET /download/<token>. Registered OUTSIDE the /mcp
+// guard above because browsers carry no user email / bearer.
+const dhlDownloadTarget = process.env.UPSTREAM_DHL;
+if (dhlDownloadTarget) {
+  app.use(
+    "/dl/dhl",
+    (req, res, next) => {
+      if (!workerSecretOk(req)) {
+        res.status(401).json({ error: "unauthorized" });
+        return;
+      }
+      next();
+    },
+    createProxyMiddleware({
+      target: dhlDownloadTarget,
+      changeOrigin: true,
+      // /dl/dhl/<token> -> /download/<token> on the MCP container.
+      pathRewrite: { "^/dl/dhl": "/download" },
+      selfHandleResponse: false,
+      on: {
+        proxyReq: (proxyReq) => {
+          // Never leak our internal headers to the container.
+          proxyReq.removeHeader("x-worker-shared-secret");
+          proxyReq.removeHeader("x-choiz-user-email");
+          proxyReq.removeHeader("x-mcp-user");
+        },
+        error: (err, _req, res) => {
+          console.error("[proxy:/dl/dhl] upstream error", err);
           if (res && "writeHead" in res && !res.headersSent) {
             res.writeHead(502, { "Content-Type": "application/json" });
             res.end(JSON.stringify({ error: "upstream_unavailable" }));
