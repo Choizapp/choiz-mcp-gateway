@@ -30,13 +30,18 @@ Tool surface:
     - create_return_shipment(payload)        : POST /shipments (return product) -> tracking + label
 
 Payload-ceiling discipline (see project_claudeai_payload_ceiling + ADDING_AN_MCP):
-  A MyDHL label PDF returned as base64 is tens of KB — far past claude.ai's
-  ~2-3 KB tool-result ceiling. _trim_documents() strips the base64 `content`
-  by default, returning tracking number + document metadata (typeCode, format,
-  base64 length) instead. Pass include_label_content=True to force the raw
-  base64 back (works via curl/direct API; will likely fail through claude.ai).
-  Prefer requesting URL-referenced labels in your payload's
-  outputImageProperties so the wrapper returns a short link instead.
+  A MyDHL label PDF returned as base64 is tens of KB — far past whatever
+  claude.ai can carry back through the MCP tool-result channel. Returning it
+  inline HANGS the claude.ai session (confirmed in prod 2026-06-02: a real
+  create_shipment call left the UI spinning forever). MyDHL Express returns
+  labels ONLY as base64 (the URL-reference output is a Parcel DE / eCommerce
+  feature, not Express), so there is no DHL-hosted link to hand back.
+
+  Therefore _trim_documents() ALWAYS strips the base64 `content` — there is no
+  opt-in to return it through claude.ai. The shipment + label ARE created on
+  DHL's side; create_shipment returns the tracking number + document metadata
+  + a note on how to retrieve the actual PDF (MyDHL+ portal today; a
+  gateway-hosted download link is the planned follow-up).
 
 The MyDHL shipment body is large and account-specific (~hundreds of fields:
 shipper/receiver accounts, productCode, packages, customs, value-added
@@ -132,12 +137,13 @@ def _request(
     )
 
 
-def _trim_documents(data: dict[str, Any], *, include_content: bool) -> dict[str, Any]:
-    """Strip heavy base64 label content out of a shipment response.
+def _trim_documents(data: dict[str, Any]) -> dict[str, Any]:
+    """Always strip heavy base64 label content out of a shipment response.
 
     MyDHL returns created labels/invoices under `documents[].content` as base64.
-    Left inline these blow past claude.ai's payload ceiling. Unless the caller
-    opts in with include_content=True, replace each `content` with a small
+    Returned inline they hang the claude.ai session (no opt-in to send them
+    through — there is no payload size that is reliably safe, and Express has no
+    URL-reference alternative). Replace each base64 `content` with a small
     metadata stub. Mutates a shallow copy and returns it.
     """
     if not isinstance(data, dict):
@@ -151,18 +157,15 @@ def _trim_documents(data: dict[str, Any], *, include_content: bool) -> dict[str,
                 continue
             d = dict(doc)
             content = d.get("content")
-            if (
-                isinstance(content, str)
-                and len(content) > _MAX_DOC_CONTENT_CHARS
-                and not include_content
-            ):
+            if isinstance(content, str) and len(content) > _MAX_DOC_CONTENT_CHARS:
                 d["content"] = {
                     "omitted": True,
                     "base64_length": len(content),
                     "note": (
-                        "Label base64 omitted to stay under claude.ai's payload "
-                        "ceiling. Retrieve via direct API with include_label_content=True, "
-                        "or request URL-referenced output in outputImageProperties."
+                        "Label base64 omitted — returning it through claude.ai "
+                        "hangs the session. The label WAS generated on DHL's "
+                        "side; retrieve the PDF from the MyDHL+ portal using the "
+                        "tracking number (a gateway-hosted download link is planned)."
                     ),
                 }
             trimmed.append(d)
@@ -234,15 +237,23 @@ def get_rates(payload: dict[str, Any]) -> dict[str, Any]:
     return _request("POST", "/rates", body=payload)
 
 
+# Guidance attached to every create response so the model never tries to pull
+# the (stripped) base64 label — doing so is what hangs claude.ai.
+_LABEL_NOTE = (
+    "Shipment created on DHL's side. The label PDF is intentionally NOT returned "
+    "here: a base64 label hangs the claude.ai session, and MyDHL Express offers "
+    "no URL alternative. Do NOT attempt to fetch or decode the label content. "
+    "Retrieve the PDF from the MyDHL+ portal using the tracking number above "
+    "(a gateway-hosted download link is the planned follow-up)."
+)
+
+
 @mcp.tool()
-def create_shipment(
-    payload: dict[str, Any],
-    include_label_content: bool = False,
-) -> dict[str, Any]:
+def create_shipment(payload: dict[str, Any]) -> dict[str, Any]:
     """Create a DHL Express shipment and generate its label. WRITE OPERATION.
 
     Calls POST /shipments with a full MyDHL-API shipment body (passthrough).
-    On success returns the assigned tracking number(s) and document metadata.
+    On success returns the assigned tracking number(s) + document metadata.
 
     IMPORTANT — this books a real shipment on the DHL account and may incur
     charges. It hits whatever DHL_BASE_URL points at; that defaults to the
@@ -255,25 +266,23 @@ def create_shipment(
         "productCode": "P",                # DHL Express product (e.g. P = Worldwide)
         "accounts": [{"typeCode": "shipper", "number": "<DHL_ACCOUNT_NUMBER>"}],
         "customerDetails": {"shipperDetails": {...}, "receiverDetails": {...}},
-        "content": {"packages": [...], "isCustomsDeclarable": false, ...},
-        "outputImageProperties": {...}     # request URL output here to avoid base64
+        "content": {"packages": [...], "isCustomsDeclarable": false, ...}
       }
 
-    Label handling: MyDHL returns labels under documents[].content as base64.
-    That is stripped by default (payload ceiling). Set include_label_content=True
-    to force the raw base64 back — works via direct API/curl but will likely
-    exceed claude.ai's tool-result ceiling. Prefer requesting URL-referenced
-    documents in outputImageProperties.
+    LABEL: the generated label comes back from DHL as base64 and is ALWAYS
+    stripped here — returning it through claude.ai hangs the session and there
+    is no opt-in to send it. The tracking number is returned; fetch the actual
+    PDF out-of-band (MyDHL+ portal). Do not try to retrieve/decode the label.
     """
     data = _request("POST", "/shipments", body=payload)
-    return _trim_documents(data, include_content=include_label_content)
+    out = _trim_documents(data)
+    if isinstance(out, dict):
+        out["_label_note"] = _LABEL_NOTE
+    return out
 
 
 @mcp.tool()
-def create_return_shipment(
-    payload: dict[str, Any],
-    include_label_content: bool = False,
-) -> dict[str, Any]:
+def create_return_shipment(payload: dict[str, Any]) -> dict[str, Any]:
     """Create a DHL Express RETURN shipment + return label. WRITE OPERATION.
 
     Same endpoint as create_shipment (POST /shipments) — a return is modeled in
@@ -281,12 +290,15 @@ def create_return_shipment(
     receiver so the parcel routes back to you. Configure the return per your DHL
     Express account (paperless return vs printed return label) in `payload`.
 
-    Same billing + TEST/production caveats and same base64 label-stripping
-    behaviour as create_shipment. See the MyDHL API reference for the return
-    body schema.
+    Same billing + TEST/production caveats and same label handling as
+    create_shipment (base64 label always stripped; retrieve out-of-band). See
+    the MyDHL API reference for the return body schema.
     """
     data = _request("POST", "/shipments", body=payload)
-    return _trim_documents(data, include_content=include_label_content)
+    out = _trim_documents(data)
+    if isinstance(out, dict):
+        out["_label_note"] = _LABEL_NOTE
+    return out
 
 
 def main() -> None:
