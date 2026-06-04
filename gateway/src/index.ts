@@ -41,6 +41,14 @@ const upstreams: Record<string, string | undefined> = {
   // /mcp auth guard above is its sole access barrier. Server-side HTTP Basic
   // auth to DHL; end users only see Google Workspace login.
   "/mcp/dhl":                  process.env.UPSTREAM_DHL,
+  // Google Sheets MCP — read + WRITE. Single slug, single container:
+  // Sheets are not brand-scoped the way GA4 properties / Power BI datasets
+  // are, so there is no choiz/timeless split. Access is bounded by which
+  // spreadsheets are shared with the sheets-editor service account, plus
+  // the /mcp auth guard above. Write-capable like dhl (see note above);
+  // unlike dhl the blast radius is "any Sheet shared with the SA", so keep
+  // the SA's sharing surface tight.
+  "/mcp/sheets":               process.env.UPSTREAM_SHEETS,
 };
 
 // --- Remote MCPs proxied through the gateway (no internal container) ---

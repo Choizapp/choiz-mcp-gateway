@@ -1,0 +1,67 @@
+# Google Sheets MCP — read + write to Google Sheets / Drive
+# (get_sheet_data, update_cells, batch_update_cells, add_rows, add_columns,
+# create_spreadsheet, create_sheet, copy_sheet, rename_sheet,
+# share_spreadsheet, add_chart, list_spreadsheets, search_spreadsheets, ...).
+#
+# Source: https://github.com/xing5/mcp-google-sheets — public PyPI package
+# `mcp-google-sheets`, no Choiz fork. Built on FastMCP
+# (mcp.server.fastmcp.FastMCP), same server framework as the official
+# ga4 / google-ads MCPs we already run in-process.
+#
+# Transport: FastMCP speaks Streamable HTTP natively. We do NOT use
+# supergateway (dropped stack-wide on 2026-05-07; --stateless leaks,
+# --stateful trips supergateway #126 with claude.ai). entrypoint.py imports
+# the package's module-level `mcp` FastMCP instance, forces its mount path
+# to "/" (FastMCP defaults to "/mcp", but the gateway strips the
+# /mcp/<name> prefix and forwards to upstream at "/"), and serves it on
+# 0.0.0.0:8080. Same in-process shape as mcp/ga4/.
+#
+# Auth: dedicated `sheets-editor` service account (NOT the read-only
+# ga4-mcp-reader). The package reads CREDENTIALS_CONFIG — a single-line
+# base64 of the SA JSON — and builds service_account.Credentials directly,
+# so no /tmp file materialization is needed (cleaner than ga4/gsc). The
+# SA must have the Sheets + Drive APIs enabled and EACH target spreadsheet
+# shared with its client_email as Editor. See compose.yml + .env.example.
+#
+# Write surface: this is the first read+write MCP in the gateway (warehouse
+# is read-only, ga4/gsc are readers). Scope is bounded by what is shared
+# with the SA, not by API scope alone.
+#
+# Pin to a commit of the upstream main branch for reproducibility. Bump
+# SHEETS_MCP_VERSION deliberately after testing a newer release.
+
+FROM python:3.12-slim
+
+# Pin the published package version (not a git SHA — this one ships clean
+# wheels on PyPI, unlike ga4/google-ads which we install from git).
+# 0.6.3 = current release: 20 tools and native ENABLED_TOOLS filtering
+# (verified — 0.5.x had only 15 tools and ignored ENABLED_TOOLS, which
+# would have silently defeated the write kill-switch).
+ARG SHEETS_MCP_VERSION=0.6.3
+
+# ca-certificates: HTTPS to sheets.googleapis.com + www.googleapis.com.
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends ca-certificates \
+ && rm -rf /var/lib/apt/lists/*
+
+RUN pip install --no-cache-dir \
+    "mcp-google-sheets==${SHEETS_MCP_VERSION}" \
+    "uvicorn[standard]"
+
+# Flush stdout immediately so init logs land in `docker logs` without delay.
+ENV PYTHONUNBUFFERED=1
+
+# The package resolves its bind host/port from HOST/PORT at import time.
+# Pin them here so the FastMCP instance binds where the gateway expects.
+# FASTMCP_STREAMABLE_HTTP_PATH is the env fallback for the mount-path
+# override the entrypoint also sets programmatically (FastMCP reads
+# settings from the FASTMCP_ env prefix). The gateway forwards to "/".
+ENV HOST=0.0.0.0 \
+    PORT=8080 \
+    FASTMCP_STREAMABLE_HTTP_PATH=/
+
+COPY entrypoint.py /opt/entrypoint.py
+
+EXPOSE 8080
+
+ENTRYPOINT ["python", "/opt/entrypoint.py"]
