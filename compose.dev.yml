@@ -58,3 +58,7 @@ services:
   dhl_mcp:
     build: ./mcp/dhl
     image: ghcr.io/choizapp/choiz-mcp-gateway/dhl:dev
+
+  sheets_mcp:
+    build: ./mcp/sheets
+    image: ghcr.io/choizapp/choiz-mcp-gateway/sheets:dev

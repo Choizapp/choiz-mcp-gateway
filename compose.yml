@@ -40,6 +40,7 @@ services:
       UPSTREAM_POWERBI_TIMELESS: "http://powerbi_timeless_mcp:8080"
       UPSTREAM_TIKTOK_ORGANIC_CHOIZ: "http://tiktok_organic_choiz_mcp:8080"
       UPSTREAM_DHL: "http://dhl_mcp:8080"
+      UPSTREAM_SHEETS: "http://sheets_mcp:8080"
       # Remote MCPs proxied through the gateway (no internal container).
       # The route is only registered if the corresponding API key is set;
       # gateway/src/index.ts logs a skip-warning otherwise. See memory
@@ -76,6 +77,7 @@ services:
       - powerbi_timeless_mcp
       - tiktok_organic_choiz_mcp
       - dhl_mcp
+      - sheets_mcp
     restart: unless-stopped
 
   warehouse_mcp:
@@ -375,4 +377,42 @@ services:
       # create_return_shipment refuse unless this is truthy. Set to "true" in
       # .env to let operators emit guides; flip back + restart to stop instantly.
       DHL_ALLOW_CREATE: ${DHL_ALLOW_CREATE:-false}
+    restart: unless-stopped
+
+  # Google Sheets MCP — xing5/mcp-google-sheets (FastMCP), served in-process
+  # over Streamable HTTP by mcp/sheets/entrypoint.py. Same single-process
+  # shape as ga4 / google-ads; no supergateway.
+  #
+  # Single tenant, single slug (/mcp/sheets). Sheets are not brand-scoped, so
+  # there is no choiz/timeless split — the model addresses each spreadsheet by
+  # its ID, and access is whatever is shared with the SA.
+  #
+  # Auth: a DEDICATED `sheets-editor` service account (NOT the read-only
+  # ga4-mcp-reader). The package reads CREDENTIALS_CONFIG as base64 SA JSON
+  # and builds credentials in-process (no /tmp file). Each spreadsheet to be
+  # touched must be shared with the SA's client_email (Editor for writes).
+  #
+  # Write kill-switch — mirrors dhl's DHL_ALLOW_CREATE. Default OFF: the
+  # entrypoint pins ENABLED_TOOLS to the read-only subset unless
+  # SHEETS_ALLOW_WRITE is truthy, in which case all 20 tools (incl.
+  # update_cells / batch_update / create_spreadsheet / share_spreadsheet)
+  # are exposed. Flip to "true" in .env + restart to enable writes; flip
+  # back + restart to stop instantly.
+  #
+  # mem_limit is a TIGHT 256m (not ga4's loose 1500m placeholder): measured
+  # idle RSS is ~74 MB (REST-only stack, no grpcio, unlike ga4/google-ads).
+  # On a 2 GB t4g.small running ~18 containers a per-container cap smaller
+  # than total RAM is the whole point — if this MCP ever leaks, Docker
+  # OOM-kills only this container (restart: unless-stopped) instead of the
+  # kernel OOM-killer evicting a random neighbor. Raise only if a large
+  # get_sheet_data response is observed pushing past the cap.
+  sheets_mcp:
+    image: ghcr.io/choizapp/choiz-mcp-gateway/sheets:${IMAGE_TAG:-latest}
+    environment:
+      # The package's env name is CREDENTIALS_CONFIG; we keep the repo's
+      # *_SERVICE_ACCOUNT_JSON_B64 convention on the .env side and alias here.
+      CREDENTIALS_CONFIG: ${SHEETS_SERVICE_ACCOUNT_JSON_B64:?set SHEETS_SERVICE_ACCOUNT_JSON_B64 in .env}
+      SHEETS_ALLOW_WRITE: ${SHEETS_ALLOW_WRITE:-false}
+    mem_limit: 256m
+    pids_limit: 100
     restart: unless-stopped
