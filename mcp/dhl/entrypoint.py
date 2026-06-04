@@ -25,9 +25,9 @@ Tool surface:
     - track_shipment(tracking_number)        : GET /shipments/{n}/tracking
     - validate_address(country_code, postal_code, ...) : GET /address-validate
     - get_rates(payload)                     : POST /rates (quote only, no booking)
-  write:
-    - create_shipment(payload)               : POST /shipments  -> tracking + label
-    - create_return_shipment(payload)        : POST /shipments (return product) -> tracking + label
+  write (two-step: kill-switch DHL_ALLOW_CREATE + confirm=true):
+    - create_shipment(payload, confirm)        : POST /shipments -> tracking + label download_url
+    - create_return_shipment(payload, confirm) : POST /shipments (return product) -> tracking + label
 
 Label delivery (see project_claudeai_payload_ceiling + ADDING_AN_MCP):
   A MyDHL label PDF returned as base64 is tens of KB — far past whatever
@@ -91,10 +91,24 @@ API_SECRET = os.environ["DHL_API_SECRET"]
 BASE_URL = (
     os.environ.get("DHL_BASE_URL") or "https://express.api.dhl.com/mydhlapi/test"
 ).rstrip("/")
-# Optional: DHL Express account number. Most MyDHL calls carry the account in
-# the request body (`accounts`), so this is only used as a convenience default
-# the caller can reference; it is NOT auto-injected into payloads.
+# Optional: DHL Express account number. Auto-injected into the shipment body's
+# `accounts` (as the shipper account) when the caller omits it, so the label's
+# "Payer Details / Freight A/C" populates correctly.
 ACCOUNT_NUMBER = os.environ.get("DHL_ACCOUNT_NUMBER", "")
+
+
+def _bool_env(name: str, default: bool = False) -> bool:
+    v = os.environ.get(name)
+    if v is None or v.strip() == "":
+        return default
+    return v.strip().lower() in ("1", "true", "yes", "on")
+
+
+# Kill-switch for the WRITE tools (create_shipment / create_return_shipment).
+# Default OFF: creation is refused unless DHL_ALLOW_CREATE is explicitly truthy
+# in the EC2 .env. Flip back to false + restart to instantly stop emitting
+# guides (reads keep working) without a code change.
+DHL_ALLOW_CREATE = _bool_env("DHL_ALLOW_CREATE", False)
 
 _AUTH_HEADER = "Basic " + base64.b64encode(
     f"{API_KEY}:{API_SECRET}".encode()
@@ -361,58 +375,153 @@ _LABEL_NOTE = (
 )
 
 
+# Proven outputImageProperties (validated against the MyDHL test base
+# 2026-06-04): label + waybillDoc merged into ONE 2-page PDF — matches what's
+# produced manually in MyDHL+. Injected when the caller omits
+# outputImageProperties so the "Hand to Courier" waybill page never goes missing.
+_DEFAULT_OUTPUT_IMAGE_PROPERTIES = {
+    "encodingFormat": "pdf",
+    "imageOptions": [
+        {"typeCode": "label", "isRequested": True},
+        {"typeCode": "waybillDoc", "isRequested": True},
+    ],
+    "allDocumentsInOneImage": True,
+    "splitTransportAndWaybillDocLabels": False,
+}
+
+
+def _apply_shipment_defaults(payload: dict[str, Any]) -> dict[str, Any]:
+    """Fill the bits the model keeps omitting, without overriding explicit input.
+
+    - outputImageProperties: default to label + waybillDoc in one PDF (the 2nd
+      "Hand to Courier" page), so the guide matches the manual MyDHL+ output.
+    - accounts: inject the shipper account from DHL_ACCOUNT_NUMBER if absent, so
+      "Payer Details / Freight A/C" populates.
+    """
+    if not isinstance(payload, dict):
+        return payload
+    p = dict(payload)
+    p.setdefault("outputImageProperties", _DEFAULT_OUTPUT_IMAGE_PROPERTIES)
+    if ACCOUNT_NUMBER and not p.get("accounts"):
+        p["accounts"] = [{"typeCode": "shipper", "number": ACCOUNT_NUMBER}]
+    return p
+
+
+def _confirm_summary(payload: dict[str, Any]) -> dict[str, Any]:
+    """Short human-readable digest of what will be shipped (for the confirm step)."""
+    rcv = (payload.get("customerDetails") or {}).get("receiverDetails") or {}
+    addr = rcv.get("postalAddress") or {}
+    contact = rcv.get("contactInformation") or {}
+    content = payload.get("content") or {}
+    accounts = payload.get("accounts") or []
+    account = accounts[0].get("number") if accounts else (ACCOUNT_NUMBER or None)
+    return {
+        "receiver": contact.get("fullName") or contact.get("companyName"),
+        "destination": " ".join(
+            str(x)
+            for x in (addr.get("cityName"), addr.get("countryCode"), addr.get("postalCode"))
+            if x
+        ),
+        "productCode": payload.get("productCode"),
+        "declaredValue": content.get("declaredValue"),
+        "currency": content.get("declaredValueCurrency"),
+        "account": account,
+    }
+
+
+def _current_env() -> str:
+    return "TEST" if "/test" in BASE_URL else "PRODUCTION"
+
+
+def _do_create(payload: dict[str, Any], confirm: bool, *, is_return: bool) -> dict[str, Any]:
+    """Shared create logic with two server-side safeguards before any DHL call:
+    (1) the DHL_ALLOW_CREATE kill-switch, (2) explicit operator confirmation.
+    """
+    kind = "return shipment" if is_return else "shipment"
+    if not DHL_ALLOW_CREATE:
+        return {
+            "status": "disabled",
+            "message": (
+                f"Creating a {kind} is disabled on this MCP (DHL_ALLOW_CREATE is off). "
+                "Ask ops to enable it in the EC2 .env if you need to emit guides."
+            ),
+        }
+    env = _current_env()
+    if not confirm:
+        return {
+            "status": "confirmation_required",
+            "environment": (
+                "PRODUCTION — emits a REAL, billable guide on the DHL account"
+                if env == "PRODUCTION"
+                else "TEST — sample label, no cost"
+            ),
+            "summary": _confirm_summary(payload),
+            "message": (
+                f"You are about to emit a {kind} in {env}. "
+                + (
+                    "⚠️ This creates a REAL shipment and bills the DHL account. "
+                    if env == "PRODUCTION"
+                    else ""
+                )
+                + "Review the summary with the operator; if approved, call this tool "
+                "again with confirm=true to actually create the guide."
+            ),
+        }
+    data = _request("POST", "/shipments", body=_apply_shipment_defaults(payload))
+    out = _externalize_documents(data)
+    if isinstance(out, dict):
+        out["_label_note"] = _LABEL_NOTE
+    return out
+
+
 @mcp.tool()
-def create_shipment(payload: dict[str, Any]) -> dict[str, Any]:
-    """Create a DHL Express shipment and generate its label. WRITE OPERATION.
+def create_shipment(payload: dict[str, Any], confirm: bool = False) -> dict[str, Any]:
+    """Create a DHL Express shipment + label. WRITE OPERATION (two-step).
 
-    Calls POST /shipments with a full MyDHL-API shipment body (passthrough).
-    On success returns the assigned tracking number(s) + document metadata.
+    Server-side safeguards:
+      • Kill-switch: refuses unless DHL_ALLOW_CREATE is enabled in the EC2 .env.
+      • Confirmation: with confirm=false (default) it creates NOTHING — it returns
+        a summary + environment (TEST vs PRODUCTION/billable) and asks you to
+        re-call with confirm=true once the operator approves.
 
-    IMPORTANT — this books a real shipment on the DHL account and may incur
-    charges. It hits whatever DHL_BASE_URL points at; that defaults to the
-    MyDHL TEST environment. Production only when DHL_BASE_URL is set to the
-    production base in the EC2 .env.
+    Books against whatever DHL_BASE_URL points at (defaults to the MyDHL TEST
+    base; PRODUCTION only when explicitly set). In PRODUCTION each confirmed call
+    emits a real, billable guide.
 
-    The `payload` must follow the MyDHL API "Create Shipment" schema, e.g.:
+    The label (transport label + "Hand to Courier" waybill, ONE 2-page PDF) is
+    returned as documents[].content.download_url — a browser link; never inlined
+    (that hangs claude.ai). `outputImageProperties` and the shipper account are
+    auto-filled, so a minimal payload still yields a complete guide. Provide:
       {
-        "plannedShippingDateAndTime": "2026-06-10T13:00:00 GMT+00:00",
-        "productCode": "P",                # DHL Express product (e.g. P = Worldwide)
-        "accounts": [{"typeCode": "shipper", "number": "<DHL_ACCOUNT_NUMBER>"}],
-        "customerDetails": {"shipperDetails": {...}, "receiverDetails": {...}},
-        "content": {"packages": [...], "isCustomsDeclarable": false, ...}
+        "plannedShippingDateAndTime": "2026-06-10T13:00:00 GMT-06:00",
+        "productCode": "N",                       # N = MX EXPRESS DOMESTIC
+        "customerDetails": {
+          "shipperDetails": {"postalAddress": {...}, "contactInformation": {"fullName","phone","companyName"}},
+          "receiverDetails": {"postalAddress": {...}, "contactInformation": {"fullName","phone","email"}}
+        },
+        "content": {
+          "packages": [{"weight": 0.3, "dimensions": {"length":10,"width":10,"height":10}}],
+          "isCustomsDeclarable": false, "unitOfMeasurement": "metric",
+          "declaredValue": 1699, "declaredValueCurrency": "MXN",
+          "description": "...", "incoterm": "DAP"
+        }
       }
-
-    LABEL: the generated label comes back from DHL as base64; it is NEVER
-    inlined (that hangs claude.ai). Instead each document is stashed and
-    documents[].content is replaced with a `download_url` — a browser link the
-    user opens to download the PDF (valid LABEL_TTL_MINUTES). Hand the user that
-    link; do not fetch or decode the label yourself.
+    Contact info (phone/email) and declaredValue matter — without them the guide
+    omits data the manual MyDHL+ label includes.
     """
-    data = _request("POST", "/shipments", body=payload)
-    out = _externalize_documents(data)
-    if isinstance(out, dict):
-        out["_label_note"] = _LABEL_NOTE
-    return out
+    return _do_create(payload, confirm, is_return=False)
 
 
 @mcp.tool()
-def create_return_shipment(payload: dict[str, Any]) -> dict[str, Any]:
-    """Create a DHL Express RETURN shipment + return label. WRITE OPERATION.
+def create_return_shipment(payload: dict[str, Any], confirm: bool = False) -> dict[str, Any]:
+    """Create a DHL Express RETURN shipment + return label. WRITE OPERATION (two-step).
 
-    Same endpoint as create_shipment (POST /shipments) — a return is modeled in
-    the body by using your account's return product code and swapping shipper /
-    receiver so the parcel routes back to you. Configure the return per your DHL
-    Express account (paperless return vs printed return label) in `payload`.
-
-    Same billing + TEST/production caveats and same label handling as
-    create_shipment (label externalized to a download_url; never inlined). See
-    the MyDHL API reference for the return body schema.
+    Same safeguards as create_shipment (DHL_ALLOW_CREATE kill-switch + confirm=true)
+    and same label handling (download_url, auto-filled outputImageProperties). A
+    return is modeled in `payload` via your account's return product code and by
+    swapping shipper/receiver so the parcel routes back to you.
     """
-    data = _request("POST", "/shipments", body=payload)
-    out = _externalize_documents(data)
-    if isinstance(out, dict):
-        out["_label_note"] = _LABEL_NOTE
-    return out
+    return _do_create(payload, confirm, is_return=True)
 
 
 def main() -> None:
