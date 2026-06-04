@@ -371,4 +371,8 @@ services:
       # exposes it publicly (token is the capability). TTL in minutes.
       LABEL_DOWNLOAD_BASE_URL: ${LABEL_DOWNLOAD_BASE_URL:-https://mcp.choiz.com.mx/dl/dhl}
       LABEL_TTL_MINUTES: ${LABEL_TTL_MINUTES:-30}
+      # Kill-switch for the write tools. Default OFF — create_shipment /
+      # create_return_shipment refuse unless this is truthy. Set to "true" in
+      # .env to let operators emit guides; flip back + restart to stop instantly.
+      DHL_ALLOW_CREATE: ${DHL_ALLOW_CREATE:-false}
     restart: unless-stopped
