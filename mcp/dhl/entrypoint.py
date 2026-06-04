@@ -25,9 +25,13 @@ Tool surface:
     - track_shipment(tracking_number)        : GET /shipments/{n}/tracking
     - validate_address(country_code, postal_code, ...) : GET /address-validate
     - get_rates(payload)                     : POST /rates (quote only, no booking)
-  write (two-step: kill-switch DHL_ALLOW_CREATE + confirm=true):
-    - create_shipment(payload, confirm)        : POST /shipments -> tracking + label download_url
-    - create_return_shipment(payload, confirm) : POST /shipments (return product) -> tracking + label
+  write (two-step: kill-switch DHL_ALLOW_CREATE + confirm=true; pharmacy party
+  block + guide-type rules injected server-side):
+    - create_shipment(payload, guide_type, confirm) : lab -> patient.
+      guide_type "normal" (home) or "ocurre" (DHL branch; receiver company
+      forced to "DHL OCURRE"). Shipper = pharmacy (auto).
+    - create_return_shipment(payload, confirm)      : patient -> pharmacy.
+      Receiver = pharmacy (auto); shipper = patient (caller-provided).
 
 Label delivery (see project_claudeai_payload_ceiling + ADDING_AN_MCP):
   A MyDHL label PDF returned as base64 is tens of KB — far past whatever
@@ -389,6 +393,28 @@ _DEFAULT_OUTPUT_IMAGE_PROPERTIES = {
     "splitTransportAndWaybillDocLabels": False,
 }
 
+# Canonical pharmacy (Choiz / Farmacias Magistrales) party block. It is ALWAYS
+# one side of a guide — the shipper for normal/ocurre (lab → patient), the
+# receiver for returns (patient → pharmacy) — so it is injected server-side and
+# every guide carries the complete, correct pharmacy details (matches MyDHL+).
+_PHARMACY_DETAILS = {
+    "postalAddress": {
+        "postalCode": "14420",
+        "cityName": "MESA DE LOS HORNOS-TLALPAN",
+        "countryCode": "MX",
+        "addressLine1": "La loma 20",
+        "addressLine2": "Tlalpan CDMX 14420",
+        "addressLine3": "Farmacias Magistrales",
+    },
+    "contactInformation": {
+        "companyName": "Choiz",
+        "fullName": "Sandra Lara",
+        "phone": "+525568099093",
+        "mobilePhone": "+525568099093",
+        "email": "compras@farmaciasmagistrales.com.mx",
+    },
+}
+
 
 def _apply_shipment_defaults(payload: dict[str, Any]) -> dict[str, Any]:
     """Fill the bits the model keeps omitting, without overriding explicit input.
@@ -410,25 +436,62 @@ def _apply_shipment_defaults(payload: dict[str, Any]) -> dict[str, Any]:
     return p
 
 
-def _confirm_summary(payload: dict[str, Any]) -> dict[str, Any]:
-    """Short human-readable digest of what will be shipped (for the confirm step)."""
-    rcv = (payload.get("customerDetails") or {}).get("receiverDetails") or {}
-    addr = rcv.get("postalAddress") or {}
-    contact = rcv.get("contactInformation") or {}
+def _apply_guide_type(payload: dict[str, Any], guide_type: str) -> dict[str, Any]:
+    """Place the canonical pharmacy block on the correct side + enforce per-type
+    rules SERVER-SIDE (never depends on the model getting it right):
+
+    - normal: pharmacy = shipper; receiver = patient (company name defaults to
+      the patient's full name if absent).
+    - ocurre: pharmacy = shipper; receiver = patient, but the receiver company
+      name is FORCED to "DHL OCURRE" (else the branch won't accept the parcel).
+    - return: pharmacy = RECEIVER; shipper = patient (caller-provided).
+    """
+    if not isinstance(payload, dict):
+        return payload
+    p = dict(payload)
+    cd = dict(p.get("customerDetails") or {})
+    if guide_type in ("normal", "ocurre"):
+        cd["shipperDetails"] = _PHARMACY_DETAILS
+        rcv = dict(cd.get("receiverDetails") or {})
+        ci = dict(rcv.get("contactInformation") or {})
+        if guide_type == "ocurre":
+            ci["companyName"] = "DHL OCURRE"
+        else:
+            ci.setdefault("companyName", ci.get("fullName"))
+        rcv["contactInformation"] = ci
+        cd["receiverDetails"] = rcv
+    elif guide_type == "return":
+        cd["receiverDetails"] = _PHARMACY_DETAILS
+    p["customerDetails"] = cd
+    return p
+
+
+def _confirm_summary(payload: dict[str, Any], guide_type: str) -> dict[str, Any]:
+    """Human-readable digest of what will be shipped (for the confirm step)."""
+    cd = payload.get("customerDetails") or {}
+
+    def _endpoint(d: dict[str, Any] | None) -> dict[str, Any]:
+        d = d or {}
+        a = d.get("postalAddress") or {}
+        c = d.get("contactInformation") or {}
+        return {
+            "name": c.get("fullName") or c.get("companyName"),
+            "company": c.get("companyName"),
+            "place": " ".join(
+                str(x) for x in (a.get("cityName"), a.get("countryCode"), a.get("postalCode")) if x
+            ),
+        }
+
     content = payload.get("content") or {}
     accounts = payload.get("accounts") or []
-    account = accounts[0].get("number") if accounts else (ACCOUNT_NUMBER or None)
     return {
-        "receiver": contact.get("fullName") or contact.get("companyName"),
-        "destination": " ".join(
-            str(x)
-            for x in (addr.get("cityName"), addr.get("countryCode"), addr.get("postalCode"))
-            if x
-        ),
+        "guide_type": guide_type,
+        "from": _endpoint(cd.get("shipperDetails")),
+        "to": _endpoint(cd.get("receiverDetails")),
         "productCode": payload.get("productCode"),
         "declaredValue": content.get("declaredValue"),
         "currency": content.get("declaredValueCurrency"),
-        "account": account,
+        "payer_account": (accounts[0].get("number") if accounts else ACCOUNT_NUMBER) or None,
     }
 
 
@@ -436,31 +499,33 @@ def _current_env() -> str:
     return "TEST" if "/test" in BASE_URL else "PRODUCTION"
 
 
-def _do_create(payload: dict[str, Any], confirm: bool, *, is_return: bool) -> dict[str, Any]:
-    """Shared create logic with two server-side safeguards before any DHL call:
-    (1) the DHL_ALLOW_CREATE kill-switch, (2) explicit operator confirmation.
+def _do_create(payload: dict[str, Any], confirm: bool, *, guide_type: str) -> dict[str, Any]:
+    """Shared create logic. Applies the guide-type party blocks + defaults, then
+    two server-side safeguards before any DHL call: (1) the DHL_ALLOW_CREATE
+    kill-switch, (2) explicit operator confirmation.
     """
-    kind = "return shipment" if is_return else "shipment"
     if not DHL_ALLOW_CREATE:
         return {
             "status": "disabled",
             "message": (
-                f"Creating a {kind} is disabled on this MCP (DHL_ALLOW_CREATE is off). "
+                "Creating guides is disabled on this MCP (DHL_ALLOW_CREATE is off). "
                 "Ask ops to enable it in the EC2 .env if you need to emit guides."
             ),
         }
+    final = _apply_shipment_defaults(_apply_guide_type(payload, guide_type))
     env = _current_env()
     if not confirm:
         return {
             "status": "confirmation_required",
+            "guide_type": guide_type,
             "environment": (
                 "PRODUCTION — emits a REAL, billable guide on the DHL account"
                 if env == "PRODUCTION"
                 else "TEST — sample label, no cost"
             ),
-            "summary": _confirm_summary(payload),
+            "summary": _confirm_summary(final, guide_type),
             "message": (
-                f"You are about to emit a {kind} in {env}. "
+                f"You are about to emit a '{guide_type}' guide in {env}. "
                 + (
                     "⚠️ This creates a REAL shipment and bills the DHL account. "
                     if env == "PRODUCTION"
@@ -470,7 +535,7 @@ def _do_create(payload: dict[str, Any], confirm: bool, *, is_return: bool) -> di
                 "again with confirm=true to actually create the guide."
             ),
         }
-    data = _request("POST", "/shipments", body=_apply_shipment_defaults(payload))
+    data = _request("POST", "/shipments", body=final)
     out = _externalize_documents(data)
     if isinstance(out, dict):
         out["_label_note"] = _LABEL_NOTE
@@ -478,29 +543,36 @@ def _do_create(payload: dict[str, Any], confirm: bool, *, is_return: bool) -> di
 
 
 @mcp.tool()
-def create_shipment(payload: dict[str, Any], confirm: bool = False) -> dict[str, Any]:
-    """Create a DHL Express shipment + label. WRITE OPERATION (two-step).
+def create_shipment(
+    payload: dict[str, Any], guide_type: str = "normal", confirm: bool = False
+) -> dict[str, Any]:
+    """Create an OUTBOUND DHL Express guide (lab → patient). WRITE OPERATION (two-step).
 
-    Server-side safeguards:
-      • Kill-switch: refuses unless DHL_ALLOW_CREATE is enabled in the EC2 .env.
-      • Confirmation: with confirm=false (default) it creates NOTHING — it returns
-        a summary + environment (TEST vs PRODUCTION/billable) and asks you to
-        re-call with confirm=true once the operator approves.
+    `guide_type`:
+      • "normal" — delivery to the patient's home address (default).
+      • "ocurre" — delivery to a DHL branch for pickup; the receiver company name
+        is FORCED to "DHL OCURRE" (required, or the branch rejects the parcel).
 
-    Books against whatever DHL_BASE_URL points at (defaults to the MyDHL TEST
-    base; PRODUCTION only when explicitly set). In PRODUCTION each confirmed call
-    emits a real, billable guide.
+    The SHIPPER is ALWAYS the Choiz / Farmacias Magistrales pharmacy and is
+    injected automatically — DO NOT provide shipperDetails. You provide the
+    PATIENT as the receiver + the content.
 
-    The label (transport label + "Hand to Courier" waybill, ONE 2-page PDF) is
-    returned as documents[].content.download_url — a browser link; never inlined
-    (that hangs claude.ai). `outputImageProperties` and the shipper account are
-    auto-filled, so a minimal payload still yields a complete guide. Provide:
+    Safeguards: refuses unless DHL_ALLOW_CREATE is on; with confirm=false
+    (default) it creates NOTHING and returns a summary to approve — re-call with
+    confirm=true to actually emit. In PRODUCTION a confirmed call is real + billable.
+
+    The label (label + "Hand to Courier" waybill, ONE 2-page PDF) comes back as
+    documents[].content.download_url — give that link to the operator; never
+    inlined. outputImageProperties, pickup and the payer account (986385678) are
+    auto-filled. Provide:
       {
         "plannedShippingDateAndTime": "2026-06-10T13:00:00 GMT-06:00",
         "productCode": "N",                       # N = MX EXPRESS DOMESTIC
         "customerDetails": {
-          "shipperDetails": {"postalAddress": {...}, "contactInformation": {"fullName","phone","companyName"}},
-          "receiverDetails": {"postalAddress": {...}, "contactInformation": {"fullName","phone","email"}}
+          "receiverDetails": {
+            "postalAddress": {"postalCode","cityName","countryCode":"MX","addressLine1"},
+            "contactInformation": {"fullName","phone","email"}
+          }
         },
         "content": {
           "packages": [{"weight": 0.3, "dimensions": {"length":10,"width":10,"height":10}}],
@@ -509,22 +581,28 @@ def create_shipment(payload: dict[str, Any], confirm: bool = False) -> dict[str,
           "description": "...", "incoterm": "DAP"
         }
       }
-    Contact info (phone/email) and declaredValue matter — without them the guide
-    omits data the manual MyDHL+ label includes.
+    For "ocurre" the receiver address is the DHL branch; the patient's name still
+    goes in receiver fullName. Confirm declaredValue + description per shipment.
     """
-    return _do_create(payload, confirm, is_return=False)
+    gt = (guide_type or "normal").strip().lower()
+    if gt not in ("normal", "ocurre"):
+        gt = "normal"
+    return _do_create(payload, confirm, guide_type=gt)
 
 
 @mcp.tool()
 def create_return_shipment(payload: dict[str, Any], confirm: bool = False) -> dict[str, Any]:
-    """Create a DHL Express RETURN shipment + return label. WRITE OPERATION (two-step).
+    """Create a RETURN guide (patient → pharmacy). WRITE OPERATION (two-step).
 
-    Same safeguards as create_shipment (DHL_ALLOW_CREATE kill-switch + confirm=true)
-    and same label handling (download_url, auto-filled outputImageProperties). A
-    return is modeled in `payload` via your account's return product code and by
-    swapping shipper/receiver so the parcel routes back to you.
+    The RECEIVER is ALWAYS the Choiz / Farmacias Magistrales pharmacy and is
+    injected automatically — DO NOT provide receiverDetails. You provide the
+    PATIENT as the shipper (shipperDetails) + the content. Choiz pays the freight
+    (account 986385678, auto-filled), product N.
+
+    Same safeguards + label handling as create_shipment (confirm=true required;
+    label via download_url).
     """
-    return _do_create(payload, confirm, is_return=True)
+    return _do_create(payload, confirm, guide_type="return")
 
 
 def main() -> None:

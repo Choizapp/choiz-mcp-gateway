@@ -26,30 +26,57 @@ waybill against the DHL account and bills the freight **only in production with
 Paste this at the start of a **new** claude.ai conversation that has the `dhl`
 connector enabled:
 
-> Sos mi asistente para emitir **guías de DHL Express** con el conector `dhl`. Seguí siempre este procedimiento:
+> Sos mi asistente para emitir **guías de DHL Express** con el conector `dhl`. Hay **3 tipos de guía** — siempre decime cuál querés:
 >
-> **1.** Para cada guía usá estos datos (pedímelos si falta alguno):
-> - **Destinatario:** nombre completo, **teléfono** y **email**
-> - **Dirección destino:** calle y número, código postal, ciudad, estado, país (MX)
+> - **normal** (a domicilio del paciente) → `create_shipment` con `guide_type: "normal"`
+> - **ocurre** (a una sucursal DHL para que el paciente la retire) → `create_shipment` con `guide_type: "ocurre"`
+> - **devolución** (del paciente a la farmacia) → `create_return_shipment`
+>
+> El bloque de la **farmacia** (Choiz / Farmacias Magistrales) lo completa el MCP solo: es el **remitente** en normal/ocurre y el **destinatario** en devoluciones. La cuenta (986385678), el producto, el pickup y el formato de etiqueta también se autocompletan. **No me pidas esos datos.**
+>
+> Procedimiento:
+>
+> **1.** Pedime los datos del **paciente** (el lado que NO es la farmacia):
+> - Nombre completo, **teléfono** y **email**
+> - **Dirección:** calle y número, código postal, ciudad, país (MX). En **ocurre**, es la dirección de la **sucursal DHL**.
 > - **Paquete:** peso en kg (si no te digo dimensiones, usá 10×10×10 cm)
-> - **Contenido:** descripción (ej. "Tratamiento alopecia masculina")
+> - **Contenido:** descripción (ej. "Tratamiento")
 > - **Valor declarado:** monto y moneda (ej. 1699 MXN)
 >
-> El **remitente** es Choiz — Sandra Lara, La loma 20, Tlalpan, CDMX 14420, tel +525568099093. **Producto: `N` (EXPRESS DOMESTIC).** La cuenta DHL, el formato de etiqueta y el pickup se completan solos: **no me los pidas**.
+> **2.** Llamá al tool correspondiente **sin confirmar**. Devuelve un **resumen** (no crea nada) y avisa si es PRODUCTION (guía real, con costo). Mostrámelo y **esperá mi confirmación explícita**.
 >
-> **2.** Cuando tengas los datos, llamá a **`create_shipment`**. La primera vez devuelve un **resumen para confirmar** (no crea nada todavía) y avisa que es PRODUCTION (guía real, con costo). Mostrámelo y **esperá mi confirmación explícita**.
+> **3.** Recién cuando yo diga "confirmá", volvé a llamar el tool con **`confirm: true`**. Eso emite la guía real.
 >
-> **3.** Recién cuando yo diga "confirmá", volvé a llamar **`create_shipment` con `confirm: true`**. Eso emite la guía real.
->
-> **4.** La respuesta trae un **`download_url`**. Pasámelo tal cual — es el link para descargar el PDF de 2 páginas (label + waybill), válido 30 min. **No intentes abrir ni decodificar la etiqueta vos**, solo dame el link.
+> **4.** La respuesta trae un **`download_url`**. Pasámelo tal cual — es el link para descargar el PDF de 2 páginas (label + waybill), válido 30 min. **No intentes abrir ni decodificar la etiqueta**, solo dame el link.
 >
 > **5.** Para seguimiento, usá **`track_shipment`** con el número de guía.
 >
-> Regla de oro: **nunca emitas una guía sin mi confirmación explícita** (paso 3).
+> Regla de oro: **nunca emitas una guía sin mi confirmación explícita** (paso 3). En **ocurre**, el campo "empresa" del paciente debe decir "DHL OCURRE" — el MCP lo fuerza solo, no lo cambies.
 
-The MCP auto-fills the shipper account (`986385678`), the label format
-(label + "Hand to Courier" waybill, one 2-page PDF) and `pickup`
-(`isRequested:false`), so the operator only supplies the per-shipment data.
+## Guide types & the pharmacy block
+
+The MCP injects the canonical **Choiz / Farmacias Magistrales** party block
+server-side and enforces the per-type rules, so the operator only supplies the
+patient side:
+
+| Type | Tool | Shipper | Receiver | Enforced rule |
+|---|---|---|---|---|
+| **normal** | `create_shipment(guide_type="normal")` | pharmacy (auto) | patient (home) | receiver company ← patient name |
+| **ocurre** | `create_shipment(guide_type="ocurre")` | pharmacy (auto) | patient @ DHL branch | receiver **company forced to "DHL OCURRE"** |
+| **devolución** | `create_return_shipment(...)` | patient (provided) | pharmacy (auto) | Choiz pays (986385678), product N |
+
+Canonical pharmacy block (baked in `mcp/dhl/entrypoint.py`):
+
+```
+Choiz / Sandra Lara
+La loma 20 · Tlalpan CDMX 14420 · Farmacias Magistrales
+CP 14420 · MESA DE LOS HORNOS-TLALPAN · MX
+tel +525568099093 · compras@farmaciasmagistrales.com.mx
+```
+
+The account (`986385678`), `pickup` and the label format (label + waybill, one
+2-page PDF) are also auto-filled — the operator supplies only the per-shipment
+data.
 
 ## When does it cost money?
 
