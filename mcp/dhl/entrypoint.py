@@ -397,11 +397,14 @@ def _apply_shipment_defaults(payload: dict[str, Any]) -> dict[str, Any]:
       "Hand to Courier" page), so the guide matches the manual MyDHL+ output.
     - accounts: inject the shipper account from DHL_ACCOUNT_NUMBER if absent, so
       "Payer Details / Freight A/C" populates.
+    - pickup: MyDHL REQUIRES this key (422 "required key [pickup] not found"
+      otherwise). Default to no scheduled pickup (drop-off / OCURRE flow).
     """
     if not isinstance(payload, dict):
         return payload
     p = dict(payload)
     p.setdefault("outputImageProperties", _DEFAULT_OUTPUT_IMAGE_PROPERTIES)
+    p.setdefault("pickup", {"isRequested": False})
     if ACCOUNT_NUMBER and not p.get("accounts"):
         p["accounts"] = [{"typeCode": "shipper", "number": ACCOUNT_NUMBER}]
     return p
