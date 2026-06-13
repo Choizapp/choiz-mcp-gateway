@@ -33,9 +33,11 @@ types.setTypeParser(types.builtins.TIMESTAMPTZ, asString);
 types.setTypeParser(types.builtins.DATE, asString);
 
 // Prefer a dedicated read-only role; fall back to the same URL the warehouse
-// MCP uses (already read-only per .env convention).
+// MCP uses (already read-only per .env convention). Use `||` (not `??`): compose
+// sets WAREHOUSE_READONLY_DATABASE_URL to an EMPTY STRING via `:-` when unset, and
+// `??` would keep that empty string instead of falling back to WAREHOUSE_DATABASE_URL.
 const connectionString =
-  process.env.WAREHOUSE_READONLY_DATABASE_URL ??
+  process.env.WAREHOUSE_READONLY_DATABASE_URL ||
   process.env.WAREHOUSE_DATABASE_URL;
 
 const STATEMENT_TIMEOUT_MS = (() => {
