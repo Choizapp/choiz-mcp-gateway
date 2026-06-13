@@ -10,6 +10,11 @@ export interface WorkerEnv extends Env {
   GOOGLE_CLIENT_ID: string;
   GOOGLE_CLIENT_SECRET: string;
   WORKER_SHARED_SECRET: string;
+  // Machine credential for the Vercel dashboard's /api/warehouse/query endpoint.
+  // Unlike the MCP surface (interactive Google OAuth), this is a long-lived key
+  // the dashboard backend presents as `Authorization: Bearer <key>`. Optional:
+  // if unset, the endpoint returns 503 (not configured).
+  DASHBOARD_API_KEY?: string;
 }
 
 /**

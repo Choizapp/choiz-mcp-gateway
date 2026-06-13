@@ -1,6 +1,7 @@
 import express from "express";
 import { createProxyMiddleware } from "http-proxy-middleware";
 import { authenticate, workerSecretOk } from "./auth.js";
+import { runReadOnlyQuery } from "./warehouse.js";
 
 const app = express();
 
@@ -101,6 +102,50 @@ app.get("/healthz", (_req, res) => {
     ],
   });
 });
+
+// --- Dashboard JSON query endpoint (machine-credentialed, NOT under /mcp) ---
+// The kapso-ops-dashboard (Vercel) reads the analytic `a.*` views over HTTPS
+// here instead of opening a socket to the private RDS. The Cloudflare Worker
+// validates the dashboard's API key and only then forwards the request with the
+// shared secret; we re-check the secret (same trust model as /dl/dhl) and run
+// the SQL read-only. Returns clean JSON: { rows: [...] }. Registered OUTSIDE the
+// /mcp guard because this caller is a machine, not a Google-authenticated user.
+const READ_ONLY_PREFIX = /^\s*(select|with|explain|table|values)\b/i;
+app.post(
+  "/api/warehouse/query",
+  express.json({ limit: "64kb" }),
+  async (req, res) => {
+    if (!workerSecretOk(req)) {
+      res.status(401).json({ error: "unauthorized" });
+      return;
+    }
+    const body = (req.body ?? {}) as { sql?: unknown; params?: unknown };
+    const sql = body.sql;
+    const params = body.params ?? [];
+    if (typeof sql !== "string" || !sql.trim()) {
+      res.status(400).json({ error: "missing_sql" });
+      return;
+    }
+    if (!Array.isArray(params)) {
+      res.status(400).json({ error: "params_must_be_array" });
+      return;
+    }
+    if (!READ_ONLY_PREFIX.test(sql)) {
+      // Defense-in-depth: the READ ONLY transaction already blocks writes, but
+      // we refuse anything that isn't obviously a read before it hits the DB.
+      res.status(400).json({ error: "only_read_queries_allowed" });
+      return;
+    }
+    try {
+      const rows = await runReadOnlyQuery(sql, params);
+      res.json({ rows });
+    } catch (err) {
+      // Never log SQL params or row contents (PII). Message + tag only.
+      console.error("[api/warehouse/query] failed:", (err as Error).message);
+      res.status(500).json({ error: "query_failed" });
+    }
+  },
+);
 
 // --- Auth guard for everything under /mcp ---
 app.use("/mcp", (req, res, next) => {

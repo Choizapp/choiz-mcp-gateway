@@ -27,6 +27,21 @@ type Bindings = WorkerEnv & { OAUTH_PROVIDER: OAuthHelpers };
 const app = new Hono<{ Bindings: Bindings }>();
 
 /**
+ * Constant-time string comparison. The length check leaks the key length, which
+ * is acceptable for a long random API key; the loop avoids leaking which byte
+ * differs. Workers have no Buffer.timingSafeEqual, so we roll our own.
+ */
+function timingSafeEqual(a: string, b: string): boolean {
+  const enc = new TextEncoder();
+  const ab = enc.encode(a);
+  const bb = enc.encode(b);
+  if (ab.length !== bb.length) return false;
+  let diff = 0;
+  for (let i = 0; i < ab.length; i++) diff |= ab[i] ^ bb[i];
+  return diff === 0;
+}
+
+/**
  * Step 1: claude.ai redirects the user here to start the flow.
  */
 app.get("/authorize", async (c) => {
@@ -167,6 +182,50 @@ app.get("/dl/dhl/:token", async (c) => {
     if (v) headers.set(h, v);
   }
   return new Response(upstream.body, { status: upstream.status, headers });
+});
+
+/**
+ * Machine-credentialed warehouse query endpoint for the Vercel dashboard
+ * (kapso-ops-dashboard). Lives here (NOT under /mcp/) so the OAuthProvider hands
+ * it to us with no bearer-token machinery — we do our own API-key check instead
+ * of the interactive Google OAuth flow that human MCP clients go through.
+ *
+ * Flow: dashboard -> POST /api/warehouse/query  (Authorization: Bearer <key>)
+ *   -> constant-time compare the key against DASHBOARD_API_KEY
+ *   -> forward the JSON body to the gateway with the shared secret
+ *   -> gateway runs it read-only against the RDS and returns { rows }.
+ */
+app.post("/api/warehouse/query", async (c) => {
+  const expected = c.env.DASHBOARD_API_KEY;
+  if (!expected) {
+    return c.json({ error: "endpoint_not_configured" }, 503);
+  }
+  const auth = c.req.header("authorization") ?? "";
+  const presented = auth.startsWith("Bearer ") ? auth.slice(7) : "";
+  if (!presented || !timingSafeEqual(presented, expected)) {
+    return c.json({ error: "unauthorized" }, 401);
+  }
+
+  // Cap the body so a bad/abusive caller can't stream an unbounded payload.
+  const payload = await c.req.text();
+  if (payload.length > 64 * 1024) {
+    return c.json({ error: "payload_too_large" }, 413);
+  }
+
+  const upstream = await fetch(`${c.env.UPSTREAM_BASE}/api/warehouse/query`, {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      "x-worker-shared-secret": c.env.WORKER_SHARED_SECRET,
+    },
+    body: payload,
+  });
+  // The gateway only ever returns JSON here; pass status + body straight back.
+  const text = await upstream.text();
+  return new Response(text, {
+    status: upstream.status,
+    headers: { "content-type": "application/json" },
+  });
 });
 
 /**

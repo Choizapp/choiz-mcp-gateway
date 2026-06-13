@@ -24,6 +24,15 @@ services:
       # ALLOWED_EMAIL_DOMAINS. Defaults inside auth.ts cover the same three
       # if the env is unset, so this is mainly for explicitness + override.
       ALLOWED_EMAIL_DOMAINS: ${ALLOWED_EMAIL_DOMAINS:-choiz.com.mx,choiz.com.ar,gotimeless.ai}
+      # Warehouse JSON query endpoint (POST /api/warehouse/query), consumed by
+      # the Vercel dashboard (kapso-ops-dashboard). The gateway connects to the
+      # RDS directly with pg and runs every statement in a READ ONLY transaction.
+      # Reuse the warehouse role (already read-only) or point
+      # WAREHOUSE_READONLY_DATABASE_URL at a stricter role. The Worker gates this
+      # endpoint with DASHBOARD_API_KEY (a wrangler secret) before forwarding.
+      WAREHOUSE_DATABASE_URL: ${WAREHOUSE_DATABASE_URL:?set WAREHOUSE_DATABASE_URL in .env}
+      WAREHOUSE_READONLY_DATABASE_URL: ${WAREHOUSE_READONLY_DATABASE_URL:-}
+      WAREHOUSE_STATEMENT_TIMEOUT_MS: ${WAREHOUSE_STATEMENT_TIMEOUT_MS:-15000}
       UPSTREAM_WAREHOUSE: "http://warehouse_mcp:8080"
       UPSTREAM_META_ADS: "http://meta_ads_mcp:8080"
       UPSTREAM_FACEBOOK_CHOIZ: "http://facebook_choiz_mcp:8080"
