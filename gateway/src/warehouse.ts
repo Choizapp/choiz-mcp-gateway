@@ -71,10 +71,17 @@ function getPool(): Pool {
   pool = new Pool({
     connectionString: cleaned,
     ssl: { rejectUnauthorized: process.env.WAREHOUSE_SSL_STRICT === "true" },
-    max: 5,
+    // El dashboard dispara ~10 queries en paralelo sobre la misma vista cara.
+    // Con 5 concurrentes el RDS se ahogaba (cada una >15s); con 3 hay menos
+    // contención → cada query más rápida. Las que esperan turno se encolan
+    // (connectionTimeout abajo las cubre). Override: WAREHOUSE_POOL_MAX.
+    max: (() => {
+      const n = Number(process.env.WAREHOUSE_POOL_MAX);
+      return Number.isFinite(n) && n > 0 ? Math.floor(n) : 3;
+    })(),
     idleTimeoutMillis: 30_000,
-    // Generoso: con ~10 queries en paralelo y pool de 5, las que esperan turno
-    // no deben fallar por timeout de adquisición mientras las otras corren.
+    // Generoso: las queries encoladas no deben fallar esperando turno mientras
+    // las otras corren.
     connectionTimeoutMillis: 60_000,
   });
   pool.on("error", (err) => {
