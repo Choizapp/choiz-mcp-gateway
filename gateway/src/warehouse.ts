@@ -40,9 +40,13 @@ const connectionString =
   process.env.WAREHOUSE_READONLY_DATABASE_URL ||
   process.env.WAREHOUSE_DATABASE_URL;
 
+// El dashboard dispara ~10 queries en paralelo sobre la vista
+// a.fct_kapso_conversations (cara de materializar). Bajo esa concurrencia el RDS
+// se ralentiza, así que 15s quedaba corto (timeouts). 60s da margen; igual la
+// carga fría pasa 1 vez al día (después queda cacheada en el dashboard).
 const STATEMENT_TIMEOUT_MS = (() => {
   const n = Number(process.env.WAREHOUSE_STATEMENT_TIMEOUT_MS);
-  return Number.isFinite(n) && n > 0 ? Math.floor(n) : 15_000;
+  return Number.isFinite(n) && n > 0 ? Math.floor(n) : 60_000;
 })();
 
 let pool: Pool | null = null;
@@ -69,7 +73,9 @@ function getPool(): Pool {
     ssl: { rejectUnauthorized: process.env.WAREHOUSE_SSL_STRICT === "true" },
     max: 5,
     idleTimeoutMillis: 30_000,
-    connectionTimeoutMillis: 10_000,
+    // Generoso: con ~10 queries en paralelo y pool de 5, las que esperan turno
+    // no deben fallar por timeout de adquisición mientras las otras corren.
+    connectionTimeoutMillis: 60_000,
   });
   pool.on("error", (err) => {
     // A dropped idle client must not crash the gateway process.
