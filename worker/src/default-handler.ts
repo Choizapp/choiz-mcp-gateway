@@ -185,6 +185,29 @@ app.get("/dl/dhl/:token", async (c) => {
 });
 
 /**
+ * Public Viral Loops export download proxy. Mirror of /dl/dhl above: lives
+ * outside /mcp/ so a browser with no bearer can open it; the unguessable token
+ * in the path (issued by the viral-loops MCP, ~192 bits, short TTL) IS the
+ * capability. Forward to the gateway with the shared secret and stream the
+ * CSV/JSON straight back.
+ */
+app.get("/dl/viral-loops/:token", async (c) => {
+  const token = c.req.param("token");
+  if (!/^[A-Za-z0-9_-]{16,64}$/.test(token)) {
+    return c.text("Bad token", 400);
+  }
+  const upstream = await fetch(`${c.env.UPSTREAM_BASE}/dl/viral-loops/${token}`, {
+    headers: { "x-worker-shared-secret": c.env.WORKER_SHARED_SECRET },
+  });
+  const headers = new Headers();
+  for (const h of ["content-type", "content-disposition", "content-length"]) {
+    const v = upstream.headers.get(h);
+    if (v) headers.set(h, v);
+  }
+  return new Response(upstream.body, { status: upstream.status, headers });
+});
+
+/**
  * Machine-credentialed warehouse query endpoint for the Vercel dashboard
  * (kapso-ops-dashboard). Lives here (NOT under /mcp/) so the OAuthProvider hands
  * it to us with no bearer-token machinery — we do our own API-key check instead
