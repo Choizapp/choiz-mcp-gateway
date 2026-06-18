@@ -59,6 +59,14 @@ services:
       KAPSO_API_KEY_CHOIZ_SUPPORT:    ${KAPSO_API_KEY_CHOIZ_SUPPORT:-}
       KAPSO_API_KEY_TIMELESS_SALES:   ${KAPSO_API_KEY_TIMELESS_SALES:-}
       KAPSO_API_KEY_TIMELESS_SUPPORT: ${KAPSO_API_KEY_TIMELESS_SUPPORT:-}
+      # Mixpanel remote MCP (https://mcp.mixpanel.com/mcp). Service-account auth:
+      # the gateway builds `Authorization: Bearer Basic <base64(user:secret)>`
+      # from these two vars (see resolveRemoteAuthValue in gateway/src/index.ts).
+      # KEY = SA username (…mp-service-account); SECRET = its secret. Both must
+      # be set for the route to register (default-empty so a missing pair just
+      # skips the route instead of failing the stack).
+      MIXPANEL_API_KEY:               ${MIXPANEL_API_KEY:-}
+      MIXPANEL_API_SECRET:            ${MIXPANEL_API_SECRET:-}
       # Re-enabled 2026-05-07: cutover to the official googleads/google-ads-mcp
       # eliminates supergateway --stateless, so the original tunnel-zombie
       # trigger (per-request gRPC channel storm to googleads.googleapis.com)

@@ -66,8 +66,28 @@ const upstreams: Record<string, string | undefined> = {
 // no compose service, no CI build job.
 interface RemoteUpstream {
   target: string;       // https URL the proxy forwards to (origin + base path)
-  apiKeyEnv: string;    // env var holding the upstream API key
   apiKeyHeader: string; // header name to set on the outgoing request
+  // Credential source — provide exactly ONE of:
+  apiKeyEnv?: string;   // (a) env var whose value is used as the header verbatim
+  // (b) build a Basic-style credential from a username + secret pair:
+  basicUserEnv?: string;   //     env var holding the username
+  basicSecretEnv?: string; //     env var holding the secret
+  valuePrefix?: string;    //     header value = `${valuePrefix}${base64(user:secret)}`
+}
+
+// Resolve the outgoing auth header VALUE for a remote upstream, or undefined if
+// its credential env var(s) are not set (route is then skipped). Supports both
+// the verbatim single-env case (kapso) and the username+secret Basic build
+// (Mixpanel) without baking a pre-formatted blob into .env.
+function resolveRemoteAuthValue(cfg: RemoteUpstream): string | undefined {
+  if (cfg.apiKeyEnv) return process.env[cfg.apiKeyEnv] || undefined;
+  if (cfg.basicUserEnv && cfg.basicSecretEnv) {
+    const user = process.env[cfg.basicUserEnv];
+    const secret = process.env[cfg.basicSecretEnv];
+    if (!user || !secret) return undefined;
+    return (cfg.valuePrefix ?? "") + Buffer.from(`${user}:${secret}`).toString("base64");
+  }
+  return undefined;
 }
 const remoteUpstreams: Record<string, RemoteUpstream> = {
   // Kapso is project-scoped: one API key = one project. We expose one slug
@@ -93,6 +113,21 @@ const remoteUpstreams: Record<string, RemoteUpstream> = {
     apiKeyEnv: "KAPSO_API_KEY_TIMELESS_SUPPORT",
     apiKeyHeader: "x-api-key",
   },
+  // Mixpanel hosts an official Streamable HTTP MCP. Headless auth is a service
+  // account sent as the (unusual) literal header
+  // `Authorization: Bearer Basic <base64(username:secret)>` — note the
+  // "Bearer Basic " prefix (verified against the live API 2026-06-18). We keep
+  // the SA username + secret as two readable env vars and build that value here
+  // (see resolveRemoteAuthValue), so rotating the secret is a one-value change.
+  // MIXPANEL_API_KEY = SA username (…mp-service-account); MIXPANEL_API_SECRET =
+  // its secret. Single project/tenant; no per-brand split.
+  "/mcp/mixpanel": {
+    target: "https://mcp.mixpanel.com/mcp",
+    apiKeyHeader: "authorization",
+    basicUserEnv: "MIXPANEL_API_KEY",
+    basicSecretEnv: "MIXPANEL_API_SECRET",
+    valuePrefix: "Bearer Basic ",
+  },
 };
 
 // --- Health check (no auth) ---
@@ -102,7 +137,7 @@ app.get("/healthz", (_req, res) => {
     routes: [
       ...Object.keys(upstreams).filter((k) => upstreams[k]),
       ...Object.keys(remoteUpstreams).filter(
-        (k) => process.env[remoteUpstreams[k].apiKeyEnv],
+        (k) => resolveRemoteAuthValue(remoteUpstreams[k]),
       ),
     ],
   });
@@ -191,9 +226,10 @@ for (const [prefix, target] of Object.entries(upstreams)) {
 
 // --- Wire remote-proxied MCPs (HTTP→HTTPS with API-key injection) ---
 for (const [prefix, cfg] of Object.entries(remoteUpstreams)) {
-  const apiKey = process.env[cfg.apiKeyEnv];
+  const apiKey = resolveRemoteAuthValue(cfg);
   if (!apiKey) {
-    console.warn(`[mcp-gateway] skipping remote ${prefix}: ${cfg.apiKeyEnv} not set`);
+    const envNames = cfg.apiKeyEnv ?? `${cfg.basicUserEnv}+${cfg.basicSecretEnv}`;
+    console.warn(`[mcp-gateway] skipping remote ${prefix}: ${envNames} not set`);
     continue;
   }
   app.use(
@@ -319,6 +355,6 @@ app.listen(port, "0.0.0.0", () => {
   console.log(`[mcp-gateway] container routes:`, Object.keys(upstreams).filter((k) => upstreams[k]));
   console.log(
     `[mcp-gateway] remote routes:`,
-    Object.keys(remoteUpstreams).filter((k) => process.env[remoteUpstreams[k].apiKeyEnv]),
+    Object.keys(remoteUpstreams).filter((k) => resolveRemoteAuthValue(remoteUpstreams[k])),
   );
 });
