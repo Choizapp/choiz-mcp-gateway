@@ -50,6 +50,7 @@ services:
       UPSTREAM_TIKTOK_ORGANIC_CHOIZ: "http://tiktok_organic_choiz_mcp:8080"
       UPSTREAM_DHL: "http://dhl_mcp:8080"
       UPSTREAM_SHEETS: "http://sheets_mcp:8080"
+      UPSTREAM_VIRAL_LOOPS: "http://viral_loops_mcp:8080"
       # Remote MCPs proxied through the gateway (no internal container).
       # The route is only registered if the corresponding API key is set;
       # gateway/src/index.ts logs a skip-warning otherwise. See memory
@@ -87,6 +88,7 @@ services:
       - tiktok_organic_choiz_mcp
       - dhl_mcp
       - sheets_mcp
+      - viral_loops_mcp
     restart: unless-stopped
 
   warehouse_mcp:
@@ -422,6 +424,40 @@ services:
       # *_SERVICE_ACCOUNT_JSON_B64 convention on the .env side and alias here.
       CREDENTIALS_CONFIG: ${SHEETS_SERVICE_ACCOUNT_JSON_B64:?set SHEETS_SERVICE_ACCOUNT_JSON_B64 in .env}
       SHEETS_ALLOW_WRITE: ${SHEETS_ALLOW_WRITE:-false}
+    mem_limit: 256m
+    pids_limit: 100
+    restart: unless-stopped
+
+  # Viral Loops MCP — single tenant, READ-ONLY. Custom FastMCP server
+  # (mcp/viral-loops/entrypoint.py) wrapping the Viral Loops Web API v3 over
+  # HTTPS with a per-campaign apiToken header. Mirrors the dhl shape:
+  # requests + stateless_http, no SDK. Only GET endpoints are wired (campaign
+  # info/stats + participant data/referrals/rank/order/referrer/rewards), so
+  # unlike dhl there is no write surface to guard.
+  #
+  # Auth: VIRAL_LOOPS_API_TOKEN — the campaign's SECRET apiToken (not the
+  # client-safe publicToken). The token identifies the campaign; there is no
+  # campaignId argument. Static, no refresh. Single tenant: one campaign per
+  # container. To add a per-brand campaign later, copy this block to a
+  # viral_loops_<brand>_mcp service + add an UPSTREAM_VIRAL_LOOPS_<BRAND> entry
+  # and a /mcp/viral-loops-<brand> route — the image is brand-agnostic.
+  #
+  # mem_limit TIGHT 256m (matches sheets): REST-only stack, no heavy SDK; idle
+  # RSS is tens of MB. A leak OOM-kills only this container (restart:
+  # unless-stopped) instead of evicting a neighbor on the t4g.small.
+  viral_loops_mcp:
+    image: ghcr.io/choizapp/choiz-mcp-gateway/viral-loops:${IMAGE_TAG:-latest}
+    environment:
+      VIRAL_LOOPS_API_TOKEN: ${VIRAL_LOOPS_API_TOKEN:?set VIRAL_LOOPS_API_TOKEN in .env}
+      # Optional override; defaults to https://app.viral-loops.com/api/v3 inside
+      # the entrypoint. Leave unset in normal operation.
+      VIRAL_LOOPS_BASE_URL: ${VIRAL_LOOPS_BASE_URL:-}
+      # export_participants stashes the CSV/JSON in-memory and returns a
+      # browser-openable link under this base. The gateway proxies
+      # /dl/viral-loops/<token> -> this container's /download/<token>; the Worker
+      # exposes it publicly (the token is the capability). TTL in minutes.
+      VIRAL_LOOPS_DOWNLOAD_BASE_URL: ${VIRAL_LOOPS_DOWNLOAD_BASE_URL:-https://mcp.choiz.com.mx/dl/viral-loops}
+      VIRAL_LOOPS_EXPORT_TTL_MINUTES: ${VIRAL_LOOPS_EXPORT_TTL_MINUTES:-30}
     mem_limit: 256m
     pids_limit: 100
     restart: unless-stopped

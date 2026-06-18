@@ -62,3 +62,7 @@ services:
   sheets_mcp:
     build: ./mcp/sheets
     image: ghcr.io/choizapp/choiz-mcp-gateway/sheets:dev
+
+  viral_loops_mcp:
+    build: ./mcp/viral-loops
+    image: ghcr.io/choizapp/choiz-mcp-gateway/viral-loops:dev
