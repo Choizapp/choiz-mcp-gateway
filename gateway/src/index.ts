@@ -50,6 +50,11 @@ const upstreams: Record<string, string | undefined> = {
   // unlike dhl the blast radius is "any Sheet shared with the SA", so keep
   // the SA's sharing surface tight.
   "/mcp/sheets":               process.env.UPSTREAM_SHEETS,
+  // Viral Loops MCP — single tenant, READ-ONLY. Custom FastMCP server
+  // (mcp/viral-loops/entrypoint.py) wrapping the Viral Loops Web API v3 with a
+  // per-campaign apiToken. The campaign IS the token, so there is no campaignId
+  // argument on any tool. Only GET endpoints are exposed.
+  "/mcp/viral-loops":          process.env.UPSTREAM_VIRAL_LOOPS,
 };
 
 // --- Remote MCPs proxied through the gateway (no internal container) ---
@@ -253,6 +258,51 @@ if (dhlDownloadTarget) {
         },
         error: (err, _req, res) => {
           console.error("[proxy:/dl/dhl] upstream error", err);
+          if (res && "writeHead" in res && !res.headersSent) {
+            res.writeHead(502, { "Content-Type": "application/json" });
+            res.end(JSON.stringify({ error: "upstream_unavailable" }));
+          }
+        },
+      },
+    }),
+  );
+}
+
+// --- Viral Loops export download (public capability URL, NOT under /mcp) ---
+// Same trust model as /dl/dhl: browser GET mcp.choiz.com.mx/dl/viral-loops/<token>
+// -> Worker (no bearer) -> here. The unguessable token is the authorization; we
+// only verify the request came from the Worker (shared secret), then proxy to
+// the viral-loops MCP container's GET /download/<token>. export_participants
+// stashes the CSV/JSON in-container and hands back this link instead of inlining
+// tens of thousands of rows.
+const viralLoopsDownloadTarget = process.env.UPSTREAM_VIRAL_LOOPS;
+if (viralLoopsDownloadTarget) {
+  app.use(
+    "/dl/viral-loops",
+    (req, res, next) => {
+      if (!workerSecretOk(req)) {
+        res.status(401).json({ error: "unauthorized" });
+        return;
+      }
+      next();
+    },
+    createProxyMiddleware({
+      target: viralLoopsDownloadTarget,
+      changeOrigin: true,
+      // Express strips the "/dl/viral-loops" mount prefix before the proxy runs,
+      // so pathRewrite sees the already-stripped "/<token>". Rewrite the leading
+      // slash to "/download/" so the MCP receives /download/<token>.
+      pathRewrite: { "^/": "/download/" },
+      selfHandleResponse: false,
+      on: {
+        proxyReq: (proxyReq) => {
+          // Never leak our internal headers to the container.
+          proxyReq.removeHeader("x-worker-shared-secret");
+          proxyReq.removeHeader("x-choiz-user-email");
+          proxyReq.removeHeader("x-mcp-user");
+        },
+        error: (err, _req, res) => {
+          console.error("[proxy:/dl/viral-loops] upstream error", err);
           if (res && "writeHead" in res && !res.headersSent) {
             res.writeHead(502, { "Content-Type": "application/json" });
             res.end(JSON.stringify({ error: "upstream_unavailable" }));
