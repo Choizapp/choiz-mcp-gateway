@@ -73,6 +73,14 @@ interface RemoteUpstream {
   basicUserEnv?: string;   //     env var holding the username
   basicSecretEnv?: string; //     env var holding the secret
   valuePrefix?: string;    //     header value = `${valuePrefix}${base64(user:secret)}`
+  // Optional path rewrite applied to the proxied path. Needed when the upstream
+  // is picky about a trailing slash: express strips the "/mcp/<slug>" mount and
+  // leaves "/", which http-proxy-middleware appends to the target's path
+  // ("/mcp" -> "/mcp/"). Most upstreams tolerate that; Mixpanel 307-redirects
+  // "/mcp/" -> "/mcp", and the MCP client can't follow that cross-origin
+  // redirect (it drops our injected auth), so the connection fails. Rewriting
+  // the lone "/" to "" sends "/mcp" exactly.
+  pathRewrite?: Record<string, string>;
 }
 
 // Resolve the outgoing auth header VALUE for a remote upstream, or undefined if
@@ -127,6 +135,9 @@ const remoteUpstreams: Record<string, RemoteUpstream> = {
     basicUserEnv: "MIXPANEL_API_KEY",
     basicSecretEnv: "MIXPANEL_API_SECRET",
     valuePrefix: "Bearer Basic ",
+    // Mixpanel rejects the trailing slash: "/mcp/" 307-redirects to "/mcp"
+    // (and to http://), which the MCP client can't follow. Send "/mcp" exactly.
+    pathRewrite: { "^/$": "" },
   },
 };
 
@@ -238,6 +249,7 @@ for (const [prefix, cfg] of Object.entries(remoteUpstreams)) {
       target: cfg.target,
       changeOrigin: true,
       selfHandleResponse: false,
+      pathRewrite: cfg.pathRewrite,
       on: {
         proxyReq: (proxyReq) => {
           // Inject the upstream auth — claude.ai never sees this header.
