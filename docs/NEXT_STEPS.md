@@ -112,6 +112,7 @@ Not blocking, but worth doing eventually:
 - **Slim down the EC2 repo clone**: now that CI/CD pushes `compose.yml` via SSM, the rest of the repo on EC2 (`gateway/`, `mcp/`, `docs/`, etc.) is unused at runtime. Could be pruned to just `compose.yml` + `.env` for clarity.
 - **Image rollback ergonomics**: `:latest` is convenient but rollbacks require knowing the old SHA. Could add a small script that lists recent SHAs in GHCR and pins one in `.env` via `IMAGE_TAG`.
 - **Secondary maintainer**: document who the backup maintainer is so this doesn't single-thread on one person.
+- **Cloudflare blast-radius hardening** (opened 2026-06-26 after the worker-wipe outage): the `CLOUDFLARE_API_TOKEN` used by CI has `Workers Scripts:Edit`, which can also **delete** the Worker — a single leaked/misused token (or dashboard access) can take down every connector, as happened on 2026-06-26 (Worker deleted manually, no GH/CI trace; cause never attributed). To do: (a) review who has Cloudflare account access and which API tokens exist + their scopes; (b) consider splitting a tighter deploy token (or Workers "deploy-only" where possible); (c) document in `OPERATIONS.md` that the master copy of every Worker secret lives in **GitHub Actions Secrets + Vaultwarden** (Cloudflare and Vercel "Sensitive" vars are NOT readable back). See `project_worker_route_detach_2026-06-26` memory.
 
 ### 4. Known pending decisions
 
