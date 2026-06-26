@@ -1,0 +1,133 @@
+name: Monitor worker OAuth layer
+
+# Synthetic check of the Cloudflare Worker's PUBLIC OAuth/MCP surface — the
+# layer the tunnel monitor does NOT cover. The tunnel monitor only probes
+# tunnel.choiz.com.mx/healthz (the gateway behind the tunnel); it stays green
+# even when the Worker is gone, because traffic then falls straight through to
+# the Express gateway. That exact blind spot caused the 2026-06-26 outage
+# (Worker deleted -> recreated empty -> every connector failed). See memory
+# project_worker_route_detach_2026-06-26.
+#
+# This catches three independent failure modes, each from a single HTTP probe:
+#   1. Worker not intercepting the route (deleted / route detached)
+#        -> /.well-known is served by Express (X-Powered-By header) or != 200
+#   2. GOOGLE_CLIENT_ID secret missing
+#        -> /authorize redirects to Google with client_id=undefined
+#   3. DASHBOARD_API_KEY secret missing
+#        -> /api/warehouse/query returns 503 (endpoint_not_configured)
+#
+# On failure it opens (or reuses) a GitHub issue, which emails the team. It does
+# NOT auto-remediate: the fix is to run the "Bootstrap worker secrets" workflow.
+#
+# Cadence: every 15 min (lighter than the 5-min tunnel monitor) — check #2
+# registers one throwaway DCR client per run, so we keep the volume modest.
+
+on:
+  schedule:
+    - cron: '*/15 * * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+concurrency:
+  group: monitor-worker
+  cancel-in-progress: false
+
+jobs:
+  probe:
+    name: Probe OAuth + DCR + dashboard surface
+    runs-on: ubuntu-latest
+    steps:
+      - name: Probe
+        id: probe
+        run: |
+          set -uo pipefail
+          base="https://mcp.choiz.com.mx"
+          fail=""
+
+          # 1) OAuth metadata: must be 200 JSON, served by Cloudflare (the Worker),
+          #    NOT by the Express gateway (which means the Worker was bypassed).
+          hdrs=$(curl -s -m 10 -D - -o /tmp/meta.json "$base/.well-known/oauth-authorization-server")
+          code=$(printf '%s' "$hdrs" | awk 'NR==1{print $2}')
+          if printf '%s' "$hdrs" | grep -qi '^x-powered-by:[[:space:]]*express'; then
+            fail="$fail
+          - /.well-known is served by Express -> the Worker is NOT intercepting mcp.choiz.com.mx/* (deleted or route detached)"
+          elif [ "$code" != "200" ] || ! grep -q 'registration_endpoint' /tmp/meta.json; then
+            fail="$fail
+          - /.well-known/oauth-authorization-server unhealthy (HTTP ${code:-000})"
+          fi
+
+          # 2) GOOGLE_CLIENT_ID present: register a throwaway DCR client, then
+          #    drive /authorize and inspect the redirect to Google.
+          cid=$(curl -s -m 10 -X POST "$base/register" -H 'content-type: application/json' \
+            -d '{"client_name":"healthcheck","redirect_uris":["https://claude.ai/api/mcp/auth_callback"],"token_endpoint_auth_method":"none","grant_types":["authorization_code"],"response_types":["code"]}' \
+            | sed -n 's/.*"client_id":"\([^"]*\)".*/\1/p')
+          if [ -z "$cid" ]; then
+            fail="$fail
+          - DCR /register did not return a client_id"
+          else
+            loc=$(curl -s -m 10 -o /dev/null -D - \
+              "$base/authorize?response_type=code&client_id=$cid&redirect_uri=https%3A%2F%2Fclaude.ai%2Fapi%2Fmcp%2Fauth_callback&code_challenge=E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM&code_challenge_method=S256&state=hc" \
+              | grep -i '^location:')
+            if printf '%s' "$loc" | grep -q 'client_id=undefined'; then
+              fail="$fail
+          - /authorize sends client_id=undefined -> GOOGLE_CLIENT_ID secret missing on the Worker"
+            fi
+          fi
+
+          # 3) DASHBOARD_API_KEY present: a dummy bearer should be 401 (key set),
+          #    NOT 503 (key missing / endpoint not configured).
+          dash=$(curl -s -m 10 -o /dev/null -w '%{http_code}' -X POST "$base/api/warehouse/query" \
+            -H 'authorization: Bearer healthcheck' -H 'content-type: application/json' -d '{}')
+          if [ "$dash" = "503" ]; then
+            fail="$fail
+          - /api/warehouse/query returns 503 -> DASHBOARD_API_KEY secret missing on the Worker"
+          fi
+
+          if [ -n "$fail" ]; then
+            echo "Worker OAuth layer UNHEALTHY:$fail"
+            {
+              echo "failed=true"
+              echo "detail<<DETAIL_EOF"
+              printf '%s\n' "$fail"
+              echo "DETAIL_EOF"
+            } >> "$GITHUB_OUTPUT"
+          else
+            echo "Worker OAuth layer healthy at $(date -u +%H:%M:%SZ)"
+            echo "failed=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Open issue on failure (dedup by title)
+        if: steps.probe.outputs.failed == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          existing=$(gh issue list --repo "${{ github.repository }}" --state open \
+            --search 'Worker OAuth layer unhealthy in:title' --json number --jq 'length')
+          if [ "$existing" != "0" ]; then
+            echo "An open 'Worker OAuth layer unhealthy' issue already exists; not opening another."
+            exit 0
+          fi
+          BODY="Auto-monitor detected the Cloudflare Worker's OAuth/MCP surface is unhealthy.
+          Claude.ai connectors will fail at sign-in/registration or on tool calls.
+
+          ## Failed checks
+          ${{ steps.probe.outputs.detail }}
+
+          ## Likely cause
+          The Worker lost its secrets, or its route (mcp.choiz.com.mx/*) detached / the
+          Worker was deleted. Background: memory project_worker_route_detach_2026-06-26.
+
+          ## Fix
+          Run the **Bootstrap worker secrets** workflow (restores all 4 secrets from
+          GitHub Secrets and redeploys). If only the route is gone, a plain
+          \`deploy-worker\` redeploy re-asserts it.
+
+          - Run: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          gh issue create --repo "${{ github.repository }}" \
+            --title "[ops] Worker OAuth layer unhealthy at $(date -u +%H:%MZ)" \
+            --body "$BODY" \
+            --label "ops"
