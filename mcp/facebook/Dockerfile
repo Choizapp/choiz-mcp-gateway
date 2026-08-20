@@ -30,12 +30,17 @@
 # -- it was leaking to the MCP client on every paginated call. Both tenants
 # get this at once, since they share this image.
 #
+# Follow-up (2026-08-20): comment/docstring only -- the payload sizes quoted
+# in the bump above were estimates, and measuring them post-deploy put a
+# trimmed post at ~920 bytes (so ~184 KB at limit=200, not ~60 KB). No
+# behaviour change; the tool docstring now states the real numbers.
+#
 # The SHA below pins the exact build of the user-facing fork. Bump it when you
 # want to pick up upstream changes; CI/CD rebuilds and redeploys.
 
 FROM python:3.12-slim
 
-ARG FACEBOOK_MCP_SHA=8cf0d8c98a6e23b7ec040afb5b783ce78482bd8b
+ARG FACEBOOK_MCP_SHA=4c92a038a2b0bd3891807e30dd0944a63b1ebfc2
 
 # git: fetch source at build time. ca-certificates: HTTPS to graph.facebook.com.
 RUN apt-get update \
