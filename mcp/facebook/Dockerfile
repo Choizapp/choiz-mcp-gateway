@@ -22,12 +22,20 @@
 # facebook_choiz_mcp and facebook_timeless_mcp services. The two tenants differ
 # only in env vars (FACEBOOK_ACCESS_TOKEN, FACEBOOK_PAGE_ID).
 #
+# Bump (2026-08-20): picks up two fixes in the fork. (1) get_page_posts
+# passed no pagination parameters, so Graph applied its 25-per-page default
+# and the tool could never see further back than ~7 weeks; it now takes
+# limit/since/until and walks the cursors itself. (2) _request returned
+# Graph's paging.next verbatim, which embeds the Page access token in a URL
+# -- it was leaking to the MCP client on every paginated call. Both tenants
+# get this at once, since they share this image.
+#
 # The SHA below pins the exact build of the user-facing fork. Bump it when you
 # want to pick up upstream changes; CI/CD rebuilds and redeploys.
 
 FROM python:3.12-slim
 
-ARG FACEBOOK_MCP_SHA=6418c71de0fa0fec69667cb51583e7bbaed52a05
+ARG FACEBOOK_MCP_SHA=8cf0d8c98a6e23b7ec040afb5b783ce78482bd8b
 
 # git: fetch source at build time. ca-certificates: HTTPS to graph.facebook.com.
 RUN apt-get update \
