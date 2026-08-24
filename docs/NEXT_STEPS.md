@@ -45,6 +45,7 @@ Agreed queue (see migration-order memory):
 - [ ] **tiktok-organic** — possible candidate. Status of the local config unknown (Santi unsure if it currently works). Verify before queueing.
 - [ ] **power-bi** — Santi flagged this as a priority on 2026-04-29 EOD: he wants Power BI usable from a Claude Code routine without Power BI Desktop being open. The `powerbi-modeling-mcp` we use today is local-bound (talks to localhost XMLA on Desktop). The right path is service-principal + Power BI Service XMLA endpoint (headless, server-side refresh token). Not a 1-hour task; needs an MCP that can target the Service endpoint, plus an Azure AD app registration. Research pending.
 - [ ] **google-ads** — last and conditional. Two compounding blockers (stateless tunnel storm + stateful supergateway #126). If revisited, **evaluate swapping the fork for a different google-ads MCP** rather than fighting the same one.
+- [~] **gmail** — code SCAFFOLDED 2026-08-24, awaiting console work + tokens (see §5 below). Read-only multi-mailbox access to `hola@choiz.com.mx` + `hi@gotimeless.ai` under a single slug `/mcp/gmail`. Not a migration off a local config — the native claude.ai Gmail connector cannot cover two accounts, which is why this exists.
 
 For each one, decide whether it belongs on the gateway:
 
@@ -119,6 +120,88 @@ Not blocking, but worth doing eventually:
 - Which Postgres role does `warehouse_mcp` use? (currently: whatever `WAREHOUSE_DATABASE_URL` in the EC2 `.env` points to — check it's read-only).
 - Do we want to retain MCP call audit logs beyond the Worker's 100-event in-memory buffer?
 - Do we enable Cloudflare Access on top of OAuth for extra defense in depth? (adds friction, but gets us SSO-aware network ACLs).
+
+### 5. Gmail MCP — scaffolded 2026-08-24, NOT yet active
+
+Read-only access to the two shared inboxes (`hola@choiz.com.mx`,
+`hi@gotimeless.ai`) at a single slug `/mcp/gmail`. Code, compose service, CI job
+and env template are in; what is missing is Google-console work that cannot be
+automated from this repo.
+
+**Why it exists at all.** claude.ai's native Gmail connector authenticates as the
+signed-in user, one Google account per connector, and the same connector cannot
+be added twice. Cross-mailbox questions therefore need a server-side MCP holding
+one credential per mailbox.
+
+**Dead ends, recorded so nobody re-walks them:**
+
+- *Gmail delegation* (Settings → Accounts → Grant access) works only in the Gmail
+  web UI. The API's `userId=me` is the caller's own mailbox; delegated mailboxes
+  are invisible to it.
+- *An External OAuth app.* `gmail.readonly` is a Google **restricted** scope:
+  External ⇒ formal verification plus a CASA security assessment. External apps
+  left in "Testing" also hand out refresh tokens that expire after 7 days. Hence
+  User type = **Internal**, which needs one GCP project per Workspace org.
+- *Google Vault API* can genuinely search across mailboxes, but it is eDiscovery:
+  asynchronous, Business Plus/Enterprise only, and a wider grant than this needs.
+
+**Why per-mailbox refresh tokens and not a service account with domain-wide
+delegation.** DWD would make one container able to read *every* mailbox in
+choiz.com.mx and gotimeless.ai — HR, legal, clinical — to save a couple of
+logins. A token minted while signed in as the shared inbox reads exactly that
+inbox. Revisit only past **~6 mailboxes**, where the per-mailbox login tax starts
+to outweigh the blast radius; at that point the migration is a new SA, its client
+ID authorized in each tenant's Admin Console with `gmail.readonly`, and swapping
+`Credentials(...)` for `service_account.Credentials.with_subject(email)` in
+`mcp/gmail/entrypoint.py`. Nothing else in the design changes — the account map,
+tools and payload trimming are auth-agnostic.
+
+**Two deliberate deviations from house convention:**
+
+1. *Single slug with an `account` argument*, not per-brand slugs like
+   `ga4-choiz`/`ga4-timeless`. Those split to stop the model picking the wrong
+   tenant; here the requirement is answering one question across BOTH inboxes in
+   a single call (`account="both"`), which two connectors make impossible.
+2. *A per-user allowlist on the gateway* (`GMAIL_ALLOWED_EMAILS`, new
+   `slugAllowlists` table in `gateway/src/index.ts`). Every other slug is open to
+   any user in `ALLOWED_EMAIL_DOMAINS`; for shared mailboxes that default would
+   let any employee who learns the URL read them. Fails closed: empty env ⇒ 403
+   for everyone plus a boot warning.
+
+**No write surface, and that is load-bearing.** Scope is `gmail.readonly`; there
+are no send/reply/label/trash tools and no attachment download, so unlike
+`dhl`/`sheets` there is no kill-switch to flip. A shared inbox is
+attacker-controllable content — anyone can email `hola@` text engineered to read
+as instructions — and read-only is what bounds that to a bad answer rather than
+an action taken on the attacker's behalf. Adding a write tool here means redoing
+that threat model first.
+
+**To activate:**
+
+1. Confirm whether `gotimeless.ai` is a secondary domain of the Choiz Workspace
+   (Admin Console → Account → Domains). Same tenant ⇒ one GCP project and one
+   OAuth client covers both mailboxes; separate tenants ⇒ one per org. The env
+   layout is per-mailbox, so the code is identical either way.
+2. Per org: GCP project with Gmail API enabled, consent screen User type =
+   Internal, OAuth client of type "Desktop app", and mark the app **Trusted** in
+   Admin Console → Security → API controls (restricted scopes are blocked by
+   default; the symptom is a 403 at tool-call time, not at consent time).
+3. Run `mcp/gmail/mint_token.py` once per mailbox from a laptop, signed in **as
+   the shared inbox**. Paste the four printed lines into the EC2 `.env`.
+4. Set `GMAIL_ALLOWED_EMAILS`, restart the stack, and check `docker logs
+   gmail_mcp` for `auth ok` per mailbox.
+5. Add the connector in claude.ai: `https://mcp.choiz.com.mx/mcp/gmail/`.
+
+Until step 3 the container is healthy but empty on purpose — a mailbox listed in
+`GMAIL_ACCOUNTS` with no credentials is skipped with a warning and every tool
+returns `not_configured`, rather than crashlooping on the shared EC2. A mailbox
+with *some* of its four vars set is a hard startup failure, since silently
+serving one inbox when the operator believes two are live is the worse outcome.
+
+**Open decision, deliberately left to Santi:** if `hola@` carries patient
+correspondence, this pipes PHI into claude.ai. Not a technical blocker and not
+treated as one, but it is a data-governance call that should be made before the
+connector goes live, not after.
 
 ## Glossary
 

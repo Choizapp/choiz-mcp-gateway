@@ -51,6 +51,14 @@ services:
       UPSTREAM_DHL: "http://dhl_mcp:8080"
       UPSTREAM_SHEETS: "http://sheets_mcp:8080"
       UPSTREAM_VIRAL_LOOPS: "http://viral_loops_mcp:8080"
+      UPSTREAM_GMAIL: "http://gmail_mcp:8080"
+      # Per-slug email allowlist — a SECOND gate on top of the domain check for
+      # /mcp/gmail only. Every other slug is reachable by any user in
+      # ALLOWED_EMAIL_DOMAINS; shared inboxes are not something the whole
+      # company should be able to read through a connector URL. Comma-separated
+      # full addresses. REQUIRED: if unset, the gateway registers the route as
+      # 403-for-everyone and logs a warning at boot (fails closed, loudly).
+      GMAIL_ALLOWED_EMAILS: ${GMAIL_ALLOWED_EMAILS:-}
       # Remote MCPs proxied through the gateway (no internal container).
       # The route is only registered if the corresponding API key is set;
       # gateway/src/index.ts logs a skip-warning otherwise. See memory
@@ -97,6 +105,7 @@ services:
       - dhl_mcp
       - sheets_mcp
       - viral_loops_mcp
+      - gmail_mcp
     restart: unless-stopped
 
   warehouse_mcp:
@@ -466,6 +475,55 @@ services:
       # exposes it publicly (the token is the capability). TTL in minutes.
       VIRAL_LOOPS_DOWNLOAD_BASE_URL: ${VIRAL_LOOPS_DOWNLOAD_BASE_URL:-https://mcp.choiz.com.mx/dl/viral-loops}
       VIRAL_LOOPS_EXPORT_TTL_MINUTES: ${VIRAL_LOOPS_EXPORT_TTL_MINUTES:-30}
+    mem_limit: 256m
+    pids_limit: 100
+    restart: unless-stopped
+
+  # Gmail MCP — READ-ONLY access to the shared inboxes (hola@choiz.com.mx +
+  # hi@gotimeless.ai). Custom FastMCP server (mcp/gmail/entrypoint.py) over the
+  # Gmail REST API.
+  #
+  # SINGLE slug (/mcp/gmail) with an `account` argument, deliberately breaking
+  # the per-brand slug convention used by ga4 / gsc / powerbi / facebook. Those
+  # split per brand to stop the model picking the wrong tenant; here the whole
+  # requirement is answering one question across BOTH inboxes in a single call,
+  # which two slugs make impossible. account="both" fans out and merges.
+  #
+  # Auth: one OAuth refresh token PER MAILBOX, scope gmail.readonly. NOT a
+  # service account with domain-wide delegation — DWD would make this container
+  # able to read every mailbox in both domains (HR, legal, clinical); a
+  # per-mailbox token reads exactly one. Config is per-mailbox rather than
+  # per-tenant, so it is identical whether gotimeless.ai is a secondary domain
+  # of the Choiz Workspace or its own tenant (same client id/secret in both
+  # blocks vs. one per GCP org). Mint with mcp/gmail/mint_token.py.
+  #
+  # No write kill-switch (unlike dhl's DHL_ALLOW_CREATE / sheets'
+  # SHEETS_ALLOW_WRITE) because there is nothing to gate: the granted scope is
+  # read-only and no write tools exist. That is load-bearing, not incidental —
+  # inbox content is attacker-controllable (anyone can email a shared inbox),
+  # so read-only is what bounds prompt injection to a bad answer instead of an
+  # action taken. Adding a write tool here means re-doing that threat model.
+  #
+  # Access is additionally narrowed by GMAIL_ALLOWED_EMAILS on the gateway (see
+  # the note in the gateway service above) — the /mcp domain check alone would
+  # let any @choiz.com.mx user read these inboxes.
+  #
+  # mem_limit TIGHT 256m (matches sheets / viral-loops): REST-only stack, no
+  # heavy SDK. Bodies are capped in the entrypoint, so a large mailbox does not
+  # translate into a large resident set.
+  gmail_mcp:
+    image: ghcr.io/choizapp/choiz-mcp-gateway/gmail:${IMAGE_TAG:-latest}
+    environment:
+      # Which mailboxes to serve. Each key needs the four vars below it.
+      GMAIL_ACCOUNTS: ${GMAIL_ACCOUNTS:-choiz,timeless}
+      GMAIL_CHOIZ_EMAIL: ${GMAIL_CHOIZ_EMAIL:-}
+      GMAIL_CHOIZ_CLIENT_ID: ${GMAIL_CHOIZ_CLIENT_ID:-}
+      GMAIL_CHOIZ_CLIENT_SECRET: ${GMAIL_CHOIZ_CLIENT_SECRET:-}
+      GMAIL_CHOIZ_REFRESH_TOKEN: ${GMAIL_CHOIZ_REFRESH_TOKEN:-}
+      GMAIL_TIMELESS_EMAIL: ${GMAIL_TIMELESS_EMAIL:-}
+      GMAIL_TIMELESS_CLIENT_ID: ${GMAIL_TIMELESS_CLIENT_ID:-}
+      GMAIL_TIMELESS_CLIENT_SECRET: ${GMAIL_TIMELESS_CLIENT_SECRET:-}
+      GMAIL_TIMELESS_REFRESH_TOKEN: ${GMAIL_TIMELESS_REFRESH_TOKEN:-}
     mem_limit: 256m
     pids_limit: 100
     restart: unless-stopped
