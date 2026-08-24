@@ -32,7 +32,22 @@ ENV PATH="/opt/venv/bin:${PATH}"
 
 # Pin to the commit that introduced --transport streamable-http support.
 # https://github.com/crystaldba/postgres-mcp/commit/07eb329c
-RUN pip install --no-cache-dir 'git+https://github.com/crystaldba/postgres-mcp.git@07eb329c'
+#
+# `mcp` is pinned EXPLICITLY even though postgres-mcp pulls it transitively.
+# Outage 2026-08-24: an unrelated compose.yml change rebuilt all 16 images, this
+# one resolved a newer mcp SDK that no longer exposes `mcp.server.fastmcp`, and
+# the container crashlooped with ModuleNotFoundError. The old container had been
+# running fine for months on a version resolved at its original build — i.e. the
+# image was only accidentally reproducible. 1.25.0 matches the rest of the stack
+# (dhl / powerbi / gmail / instagram / facebook / tiktok-organic / viral-loops).
+RUN pip install --no-cache-dir \
+    'git+https://github.com/crystaldba/postgres-mcp.git@07eb329c' \
+    'mcp==1.25.0'
+
+# Fail the BUILD, not production, if the SDK layout entrypoint.py monkey-patches
+# ever moves again. This is the exact import that broke on 2026-08-24; a
+# crashlooping container discovered by a user is the expensive way to learn it.
+RUN python -c "import mcp.server.fastmcp; import postgres_mcp; print('import check OK')"
 
 COPY entrypoint.py /opt/entrypoint.py
 
