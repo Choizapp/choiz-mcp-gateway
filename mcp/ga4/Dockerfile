@@ -39,10 +39,31 @@ RUN apt-get update \
 # Install the official MCP from a pinned commit. pyproject.toml registers
 # the analytics_mcp package + console scripts, but we don't use the script
 # (entrypoint.py imports the package directly).
+# `mcp` is pinned EXPLICITLY even though the upstream pulls it transitively.
+# Outage 2026-08-24 on the warehouse image: a compose.yml change rebuilt all 16
+# images, warehouse resolved a newer `mcp` that no longer exposes
+# `mcp.server.fastmcp`, and it crashlooped after months of working — the image
+# had been reproducible only by accident. This image broke in the SAME rebuild,
+# from the other half of that release: `Tool.inputSchema` became
+# `Tool.input_schema`, so the pinned analytics_mcp died at import with
+# AttributeError and both ga4 containers sat in a restart loop.
+#
+# 1.25.0, NOT the 1.29.0 that google-ads runs. Upstream declares only
+# `mcp>=1.24.0`, 1.25.0 satisfies it, and 1.25.0 is the version every other
+# SDK-based image here runs. google-ads can stay on 1.29.0 because it uses the
+# STANDALONE fastmcp package rather than the SDK's — see
+# memory feedback_two_fastmcp_packages.
 RUN pip install --no-cache-dir \
     "git+https://github.com/googleanalytics/google-analytics-mcp.git@${GA4_MCP_SHA}" \
+    "mcp==1.25.0" \
     "uvicorn[standard]" \
     starlette
+
+# Fail the BUILD, not production, if the SDK layout moves again. This is the
+# exact import entrypoint.py depends on, plus the upstream package itself.
+# `analytics_mcp.server` (not just the top package) on purpose: importing it is
+# what registers the tools and evaluates the `tool.inputSchema` line that broke.
+RUN python -c "import mcp.server.streamable_http_manager, analytics_mcp.server; import importlib.metadata as m; print('import check OK, mcp', m.version('mcp'))"
 
 # Strip build deps once wheels are compiled to keep the final layer slim.
 RUN apt-get purge -y --auto-remove build-essential && rm -rf /var/lib/apt/lists/*

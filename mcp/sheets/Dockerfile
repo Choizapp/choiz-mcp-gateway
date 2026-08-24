@@ -44,9 +44,25 @@ RUN apt-get update \
  && apt-get install -y --no-install-recommends ca-certificates \
  && rm -rf /var/lib/apt/lists/*
 
+# `mcp` is pinned EXPLICITLY even though mcp-google-sheets pulls it
+# transitively. Outage 2026-08-24: an unrelated compose.yml change rebuilt all 16
+# images and every image built on the SDK's FastMCP surface crashlooped —
+# warehouse on `mcp.server.fastmcp` disappearing, ga4 on `Tool.inputSchema`
+# becoming `Tool.input_schema`, and this one too. The package version was pinned
+# but its SDK floor was not, so the image was reproducible only by accident.
+# 1.25.0 is the version the rest of the SDK-based stack runs.
 RUN pip install --no-cache-dir \
     "mcp-google-sheets==${SHEETS_MCP_VERSION}" \
+    "mcp==1.25.0" \
     "uvicorn[standard]"
+
+# Fail the BUILD, not production, if the SDK layout moves again.
+# `mcp.server.fastmcp` is the module that vanished on 2026-08-24 and the one this
+# package is built on. Deliberately NOT importing mcp_google_sheets.server: that
+# builds the FastMCP instance and may want CREDENTIALS_CONFIG, which does not
+# exist at build time — a check that can fail for the wrong reason is worse than
+# a narrower one.
+RUN python -c "import mcp.server.fastmcp, mcp_google_sheets; import importlib.metadata as m; print('import check OK, mcp', m.version('mcp'))"
 
 # Flush stdout immediately so init logs land in `docker logs` without delay.
 ENV PYTHONUNBUFFERED=1
