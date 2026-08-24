@@ -481,6 +481,31 @@ mcp = FastMCP(
 )
 
 
+def _account_help() -> str:
+    """The `account` paragraph for tool descriptions, built for THIS container.
+
+    Hard-coding "choiz / timeless / both" was actively misleading on the
+    per-brand containers we deploy: it told the model the connector spanned
+    both mailboxes and invited an account name that this container rejects.
+    """
+    if not ACCOUNTS:
+        return "No mailbox is configured on this server yet; every call fails."
+    if len(ACCOUNTS) == 1:
+        only = ACCOUNTS[ACCOUNT_KEYS[0]]
+        return (
+            f"This connector serves exactly ONE mailbox: {only.email} "
+            f"(account \"{only.key}\"). Omit `account` — the default already "
+            f"resolves to it. There is no other mailbox here, so no result can "
+            f"mix inboxes."
+        )
+    keys = ", ".join(f'"{k}"' for k in ACCOUNT_KEYS)
+    return (
+        f"`account`: {keys}, or \"both\" (default) to cover every mailbox in "
+        "one call, merged newest-first; each row carries the `account` it came "
+        "from, which you need to pass to get_message or get_thread."
+    )
+
+
 def _search_one(acct: Account, query: str, limit: int) -> list[dict[str, Any]]:
     """List + metadata-fetch for one mailbox.
 
@@ -514,7 +539,7 @@ def _search_one(acct: Account, query: str, limit: int) -> list[dict[str, Any]]:
     return rows
 
 
-@mcp.tool()
+@mcp.tool(description='Search this connector\'s shared inbox. Returns headers + snippet, no bodies. `query` is native Gmail search syntax — the same string you would type in the Gmail search box. Examples: "is:unread", "from:proveedor@x.com", "subject:factura after:2026/08/01", "has:attachment newer_than:7d". Empty query = most recent mail (excludes Spam and Trash). `limit` caps results per mailbox (default 10, max 50). Snippets are Gmail\'s ~200-char preview; call get_message with include_body=true only when the snippet is not enough. ' + _account_help())
 @_guard
 def search_messages(
     query: str = "",
@@ -528,10 +553,9 @@ def search_messages(
     "subject:factura after:2026/08/01", "has:attachment newer_than:7d".
     Empty query = most recent mail (excludes Spam and Trash).
 
-    `account`: "choiz", "timeless", or "both" (default). With "both", results
-    from the two mailboxes are merged and sorted newest-first, and each row
-    carries the `account` it came from — you need that value to call
-    get_message or get_thread on it.
+    The model-facing description is built at runtime by _account_help() and
+    passed to @mcp.tool(description=...), because what `account` accepts
+    depends on how this container is configured. Do not restate it here.
 
     `limit` caps results per mailbox before merging (default 10, max 50).
 
@@ -562,7 +586,7 @@ def search_messages(
     )
 
 
-@mcp.tool()
+@mcp.tool(description='Fetch one message by id. `include_body=false` (default) returns headers + snippet + labels only. Set it to true for the actual text: plain-text part preferred, HTML stripped to text as a fallback, capped at `max_body_chars` (default 4000, max 20000). The attachment manifest (names/types/sizes — never content) also requires include_body=true. ' + _account_help())
 @_guard
 def get_message(
     message_id: str,
@@ -572,8 +596,8 @@ def get_message(
 ) -> str:
     """Fetch one message by id from ONE mailbox.
 
-    `account` must name a single mailbox ("choiz" or "timeless") — ids are
-    mailbox-scoped. Take both values from a search_messages result.
+    Ids are mailbox-scoped, so `account` must resolve to exactly one mailbox;
+    on a single-mailbox container it may be omitted. See _account_help().
 
     `include_body=false` (default) returns headers + snippet + labels only.
     Set it to true for the actual text: plain-text part preferred, HTML
@@ -610,7 +634,7 @@ def get_message(
     return _dump(out)
 
 
-@mcp.tool()
+@mcp.tool(description="Fetch a whole conversation by thread id — use this to read a back-and-forth in order instead of pulling messages one by one. `include_bodies=false` (default) returns one header+snippet row per message; with true each message also carries its text, capped at `max_body_chars` (default 2000 per message, lower than get_message's because a thread multiplies it). Long threads return only the 25 most recent messages; `omitted_oldest` says how many were left out. " + _account_help())
 @_guard
 def get_thread(
     thread_id: str,
@@ -621,8 +645,8 @@ def get_thread(
     """Fetch a whole conversation by thread id from ONE mailbox.
 
     Use this to read a back-and-forth in order instead of pulling messages one
-    by one. `account` must name a single mailbox; take it and the thread_id
-    from a search_messages result.
+    by one. Ids are mailbox-scoped, so `account` must resolve to exactly one
+    mailbox; on a single-mailbox container it may be omitted.
 
     `include_bodies=false` (default) returns one header+snippet row per
     message. With true, each message also carries its text, capped at
@@ -671,7 +695,7 @@ def get_thread(
     )
 
 
-@mcp.tool()
+@mcp.tool(description="List the labels of this connector's mailbox (id, name, system vs user). Useful before searching with `label:<name>`, and to discover how the shared inbox is organized (triage labels, per-topic folders). " + _account_help())
 @_guard
 def list_labels(account: str = "both") -> str:
     """List the labels of one or both mailboxes (id, name, system vs user).
