@@ -1,4 +1,5 @@
 import express from "express";
+import type { NextFunction, Request, Response } from "express";
 import { createProxyMiddleware } from "http-proxy-middleware";
 import { authenticate, workerSecretOk } from "./auth.js";
 import { runReadOnlyQuery } from "./warehouse.js";
@@ -55,7 +56,75 @@ const upstreams: Record<string, string | undefined> = {
   // per-campaign apiToken. The campaign IS the token, so there is no campaignId
   // argument on any tool. Only GET endpoints are exposed.
   "/mcp/viral-loops":          process.env.UPSTREAM_VIRAL_LOOPS,
+  // Gmail MCP — READ-ONLY access to the shared inboxes. Per-brand slugs like
+  // ga4 / gsc / powerbi / facebook: one container per mailbox, each holding
+  // ONLY its own credentials, so the timeless container cannot reach the Choiz
+  // inbox even if the code were wrong. Cross-mailbox questions still work —
+  // Claude calls both connectors in the same turn.
+  // The only slugs with a per-user allowlist on top of the domain check; the
+  // two lists are independent so the mailboxes can have different readers.
+  "/mcp/gmail-choiz":          process.env.UPSTREAM_GMAIL_CHOIZ,
+  "/mcp/gmail-timeless":       process.env.UPSTREAM_GMAIL_TIMELESS,
 };
+
+// --- Per-slug email allowlists (second gate, on top of the domain check) ---
+// The /mcp guard authorizes any Google-verified user in ALLOWED_EMAIL_DOMAINS.
+// That is the right default for analytics MCPs, and the wrong one for a slug
+// that reads shared mailboxes: it would let any @choiz.com.mx employee who
+// learns the URL read hola@ and hi@. Slugs listed here additionally require an
+// exact email match.
+//
+// `required: true` means the slug FAILS CLOSED: if the env var is unset or
+// empty, the route is registered as 403-for-everyone and a warning is logged at
+// boot. An unconfigured allowlist must never read as "allow all".
+interface SlugAllowlist {
+  env: string;
+  required: boolean;
+}
+const slugAllowlists: Record<string, SlugAllowlist> = {
+  "/mcp/gmail-choiz": { env: "GMAIL_CHOIZ_ALLOWED_EMAILS", required: true },
+  "/mcp/gmail-timeless": { env: "GMAIL_TIMELESS_ALLOWED_EMAILS", required: true },
+};
+
+function parseAllowlist(raw: string | undefined): Set<string> {
+  return new Set(
+    (raw ?? "")
+      .split(",")
+      .map((e) => e.trim().toLowerCase())
+      .filter(Boolean),
+  );
+}
+
+/**
+ * Build the allowlist middleware for a slug, or null if the slug has none.
+ * The email comes from the x-mcp-user header the /mcp guard sets from the
+ * Worker's Google-verified identity, so it is as trustworthy as the shared
+ * secret. Logs the decision once at boot.
+ */
+function makeAllowlistGuard(prefix: string) {
+  const cfg = slugAllowlists[prefix];
+  if (!cfg) return null;
+  const allowed = parseAllowlist(process.env[cfg.env]);
+  if (allowed.size === 0) {
+    console.warn(
+      `[mcp-gateway] ${prefix}: ${cfg.env} is empty — route registered but ` +
+        `DENIED for every user. Set ${cfg.env} in .env to grant access.`,
+    );
+  } else {
+    console.log(
+      `[mcp-gateway] ${prefix}: restricted to ${allowed.size} allowlisted address(es)`,
+    );
+  }
+  return (req: Request, res: Response, next: NextFunction) => {
+    const email = req.header("x-mcp-user")?.trim().toLowerCase();
+    if (!email || !allowed.has(email)) {
+      console.warn(`[mcp-gateway] ${prefix}: denied ${email ?? "unknown-user"}`);
+      res.status(403).json({ error: "forbidden", slug: prefix });
+      return;
+    }
+    next();
+  };
+}
 
 // --- Remote MCPs proxied through the gateway (no internal container) ---
 // These vendors already serve Streamable HTTP. We proxy through the gateway
@@ -213,26 +282,31 @@ app.use("/mcp", (req, res, next) => {
 // --- Wire each prefix to its upstream (internal containers) ---
 for (const [prefix, target] of Object.entries(upstreams)) {
   if (!target) continue;
-  app.use(
-    prefix,
-    createProxyMiddleware({
-      target,
-      changeOrigin: true,
-      // Strip the prefix so the upstream sees the path it expects (e.g. /sse).
-      pathRewrite: { [`^${prefix}`]: "" },
-      // Preserve streaming (SSE, chunked responses).
-      selfHandleResponse: false,
-      on: {
-        error: (err, _req, res) => {
-          console.error(`[proxy:${prefix}] upstream error`, err);
-          if (res && "writeHead" in res && !res.headersSent) {
-            res.writeHead(502, { "Content-Type": "application/json" });
-            res.end(JSON.stringify({ error: "upstream_unavailable" }));
-          }
-        },
+  const proxy = createProxyMiddleware({
+    target,
+    changeOrigin: true,
+    // Strip the prefix so the upstream sees the path it expects (e.g. /sse).
+    pathRewrite: { [`^${prefix}`]: "" },
+    // Preserve streaming (SSE, chunked responses).
+    selfHandleResponse: false,
+    on: {
+      error: (err, _req, res) => {
+        console.error(`[proxy:${prefix}] upstream error`, err);
+        if (res && "writeHead" in res && !res.headersSent) {
+          res.writeHead(502, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: "upstream_unavailable" }));
+        }
       },
-    }),
-  );
+    },
+  });
+  // Slugs with a per-user allowlist get it in front of the proxy; everything
+  // else is gated only by the /mcp domain check above.
+  const guard = makeAllowlistGuard(prefix);
+  if (guard) {
+    app.use(prefix, guard, proxy);
+  } else {
+    app.use(prefix, proxy);
+  }
 }
 
 // --- Wire remote-proxied MCPs (HTTP→HTTPS with API-key injection) ---

@@ -51,6 +51,17 @@ services:
       UPSTREAM_DHL: "http://dhl_mcp:8080"
       UPSTREAM_SHEETS: "http://sheets_mcp:8080"
       UPSTREAM_VIRAL_LOOPS: "http://viral_loops_mcp:8080"
+      UPSTREAM_GMAIL_CHOIZ: "http://gmail_choiz_mcp:8080"
+      UPSTREAM_GMAIL_TIMELESS: "http://gmail_timeless_mcp:8080"
+      # Per-slug email allowlists — a SECOND gate on top of the domain check,
+      # for the gmail slugs only. Every other slug is reachable by any user in
+      # ALLOWED_EMAIL_DOMAINS; shared inboxes are not something the whole
+      # company should be able to read through a connector URL. Comma-separated
+      # full addresses, one list per mailbox so the two can differ.
+      # REQUIRED: if unset, the gateway registers the route as
+      # 403-for-everyone and logs a warning at boot (fails closed, loudly).
+      GMAIL_CHOIZ_ALLOWED_EMAILS: ${GMAIL_CHOIZ_ALLOWED_EMAILS:-}
+      GMAIL_TIMELESS_ALLOWED_EMAILS: ${GMAIL_TIMELESS_ALLOWED_EMAILS:-}
       # Remote MCPs proxied through the gateway (no internal container).
       # The route is only registered if the corresponding API key is set;
       # gateway/src/index.ts logs a skip-warning otherwise. See memory
@@ -97,6 +108,8 @@ services:
       - dhl_mcp
       - sheets_mcp
       - viral_loops_mcp
+      - gmail_choiz_mcp
+      - gmail_timeless_mcp
     restart: unless-stopped
 
   warehouse_mcp:
@@ -466,6 +479,68 @@ services:
       # exposes it publicly (the token is the capability). TTL in minutes.
       VIRAL_LOOPS_DOWNLOAD_BASE_URL: ${VIRAL_LOOPS_DOWNLOAD_BASE_URL:-https://mcp.choiz.com.mx/dl/viral-loops}
       VIRAL_LOOPS_EXPORT_TTL_MINUTES: ${VIRAL_LOOPS_EXPORT_TTL_MINUTES:-30}
+    mem_limit: 256m
+    pids_limit: 100
+    restart: unless-stopped
+
+  # Gmail MCP — READ-ONLY access to the shared inboxes. Custom FastMCP server
+  # (mcp/gmail/entrypoint.py) over the Gmail REST API.
+  #
+  # Multi-tenant per-brand pattern, same as facebook / instagram / ga4 / gsc /
+  # powerbi: ONE image, one container per mailbox, differing only in env.
+  # Slugs /mcp/gmail-choiz and /mcp/gmail-timeless, one claude.ai connector
+  # each. The isolation is the point — gmail_timeless_mcp receives ONLY the
+  # timeless credentials, so it cannot reach the Choiz inbox even if the code
+  # were wrong. Cross-mailbox questions still work: Claude calls both
+  # connectors in the same turn, losing only the server-side merge.
+  #
+  # (The image also supports several mailboxes in one container via
+  # GMAIL_ACCOUNTS + account="both"; we deliberately do not deploy it that way.)
+  #
+  # Auth: one OAuth refresh token PER MAILBOX, scope gmail.readonly. NOT a
+  # service account with domain-wide delegation — DWD would make a container
+  # able to read every mailbox in both domains (HR, legal, clinical); a
+  # per-mailbox token reads exactly one. Both mailboxes are in the SAME
+  # Workspace org, so one Internal OAuth client covers both and the two
+  # *_CLIENT_ID / *_CLIENT_SECRET pairs hold the same value on purpose. Mint
+  # with mcp/gmail/mint_token.py, signed in as each shared mailbox.
+  #
+  # No write kill-switch (unlike dhl's DHL_ALLOW_CREATE / sheets'
+  # SHEETS_ALLOW_WRITE) because there is nothing to gate: the granted scope is
+  # read-only and no write tools exist. That is load-bearing, not incidental —
+  # inbox content is attacker-controllable (anyone can email a shared inbox),
+  # so read-only is what bounds prompt injection to a bad answer instead of an
+  # action taken. Adding a write tool here means re-doing that threat model.
+  #
+  # Access is additionally narrowed per slug by GMAIL_CHOIZ_ALLOWED_EMAILS /
+  # GMAIL_TIMELESS_ALLOWED_EMAILS on the gateway (see the note in the gateway
+  # service above) — the /mcp domain check alone would let any @choiz.com.mx
+  # user read these inboxes. Separate lists so the two mailboxes can have
+  # different readers.
+  #
+  # mem_limit TIGHT 256m each (matches sheets / viral-loops): REST-only stack,
+  # no heavy SDK. Bodies are capped in the entrypoint, so a large mailbox does
+  # not translate into a large resident set.
+  gmail_choiz_mcp:
+    image: ghcr.io/choizapp/choiz-mcp-gateway/gmail:${IMAGE_TAG:-latest}
+    environment:
+      GMAIL_ACCOUNTS: "choiz"
+      GMAIL_CHOIZ_EMAIL: ${GMAIL_CHOIZ_EMAIL:-}
+      GMAIL_CHOIZ_CLIENT_ID: ${GMAIL_CHOIZ_CLIENT_ID:-}
+      GMAIL_CHOIZ_CLIENT_SECRET: ${GMAIL_CHOIZ_CLIENT_SECRET:-}
+      GMAIL_CHOIZ_REFRESH_TOKEN: ${GMAIL_CHOIZ_REFRESH_TOKEN:-}
+    mem_limit: 256m
+    pids_limit: 100
+    restart: unless-stopped
+
+  gmail_timeless_mcp:
+    image: ghcr.io/choizapp/choiz-mcp-gateway/gmail:${IMAGE_TAG:-latest}
+    environment:
+      GMAIL_ACCOUNTS: "timeless"
+      GMAIL_TIMELESS_EMAIL: ${GMAIL_TIMELESS_EMAIL:-}
+      GMAIL_TIMELESS_CLIENT_ID: ${GMAIL_TIMELESS_CLIENT_ID:-}
+      GMAIL_TIMELESS_CLIENT_SECRET: ${GMAIL_TIMELESS_CLIENT_SECRET:-}
+      GMAIL_TIMELESS_REFRESH_TOKEN: ${GMAIL_TIMELESS_REFRESH_TOKEN:-}
     mem_limit: 256m
     pids_limit: 100
     restart: unless-stopped

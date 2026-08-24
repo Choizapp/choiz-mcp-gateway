@@ -57,6 +57,7 @@ jobs:
       dhl: ${{ steps.filter.outputs.dhl }}
       sheets: ${{ steps.filter.outputs.sheets }}
       viral_loops: ${{ steps.filter.outputs.viral_loops }}
+      gmail: ${{ steps.filter.outputs.gmail }}
       compose: ${{ steps.filter.outputs.compose }}
     steps:
       - uses: actions/checkout@v4
@@ -92,6 +93,8 @@ jobs:
               - 'mcp/sheets/**'
             viral_loops:
               - 'mcp/viral-loops/**'
+            gmail:
+              - 'mcp/gmail/**'
             compose:
               - 'compose.yml'
 
@@ -475,13 +478,40 @@ jobs:
           cache-from: type=gha,scope=viral-loops
           cache-to: type=gha,mode=max,scope=viral-loops
 
+  build-gmail:
+    name: Build gmail image
+    needs: changes
+    if: needs.changes.outputs.gmail == 'true' || needs.changes.outputs.compose == 'true' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: ./mcp/gmail
+          push: true
+          platforms: linux/arm64
+          tags: |
+            ${{ env.IMAGE_PREFIX }}/gmail:latest
+            ${{ env.IMAGE_PREFIX }}/gmail:${{ github.sha }}
+          cache-from: type=gha,scope=gmail
+          cache-to: type=gha,mode=max,scope=gmail
+
   deploy:
     name: Deploy on EC2 via SSM
-    needs: [build-gateway, build-warehouse, build-meta-ads, build-facebook, build-instagram, build-google-ads, build-ga4, build-gsc, build-shopify, build-powerbi, build-tiktok-organic, build-dhl, build-sheets, build-viral-loops]
+    needs: [build-gateway, build-warehouse, build-meta-ads, build-facebook, build-instagram, build-google-ads, build-ga4, build-gsc, build-shopify, build-powerbi, build-tiktok-organic, build-dhl, build-sheets, build-viral-loops, build-gmail]
     # Run only if at least one build succeeded. If all builds were skipped
     # (because nothing relevant changed, e.g. workflow-only edit), do not
     # touch the EC2 — there's nothing to deploy.
-    if: ${{ !cancelled() && !failure() && (needs.build-gateway.result == 'success' || needs.build-warehouse.result == 'success' || needs.build-meta-ads.result == 'success' || needs.build-facebook.result == 'success' || needs.build-instagram.result == 'success' || needs.build-google-ads.result == 'success' || needs.build-ga4.result == 'success' || needs.build-gsc.result == 'success' || needs.build-shopify.result == 'success' || needs.build-powerbi.result == 'success' || needs.build-tiktok-organic.result == 'success' || needs.build-dhl.result == 'success' || needs.build-sheets.result == 'success' || needs.build-viral-loops.result == 'success') }}
+    if: ${{ !cancelled() && !failure() && (needs.build-gateway.result == 'success' || needs.build-warehouse.result == 'success' || needs.build-meta-ads.result == 'success' || needs.build-facebook.result == 'success' || needs.build-instagram.result == 'success' || needs.build-google-ads.result == 'success' || needs.build-ga4.result == 'success' || needs.build-gsc.result == 'success' || needs.build-shopify.result == 'success' || needs.build-powerbi.result == 'success' || needs.build-tiktok-organic.result == 'success' || needs.build-dhl.result == 'success' || needs.build-sheets.result == 'success' || needs.build-viral-loops.result == 'success' || needs.build-gmail.result == 'success') }}
     runs-on: ubuntu-latest
     steps:
       - name: Configure AWS credentials
