@@ -49,11 +49,27 @@ WORKDIR /app
 # entrypoint can import { createServer } from "./dist/server.js".
 # `npm install` (without --production) fetches devDeps required by
 # tsc; `npm run build` runs tsc + chmod on dist/*.js.
+# The upstream repo ships no lockfile, so a bare `npm install` re-resolves
+# @modelcontextprotocol/sdk from a semver RANGE on every rebuild — the image was
+# reproducible only by accident. Outage 2026-08-24 on the warehouse image: an
+# unrelated compose.yml change rebuilt all 16 images, warehouse picked up a newer
+# SDK that had moved a module, and it crashlooped after months of working. Same
+# exposure here, different ecosystem.
+#
+# 1.26.0 is the version measured running in production on 2026-08-24, and it
+# satisfies upstream's range — this pins what already works rather than moving it.
+# --save-exact so the write into package.json cannot drift either.
 RUN git clone https://github.com/ahonn/mcp-server-gsc.git . \
  && git checkout "${GSC_MCP_SHA}" \
  && npm install \
+ && npm install --save-exact "@modelcontextprotocol/sdk@1.26.0" \
  && npm run build \
- && npm prune --production
+ && npm prune --production \
+ && node -e "console.log('sdk pinned at', require('/app/node_modules/@modelcontextprotocol/sdk/package.json').version)"
+
+# Fail the BUILD, not production, if the SDK entrypoint.mjs imports ever move.
+# These are the exact specifiers it uses.
+RUN node --input-type=module -e "import '@modelcontextprotocol/sdk/server/streamableHttp.js'; import '@modelcontextprotocol/sdk/types.js'; console.log('import check OK')"
 
 # Our streamable-http launcher. Bundled in /app so its
 # `import "./dist/server.js"` resolves correctly and so its
