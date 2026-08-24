@@ -77,11 +77,23 @@ async def _serve() -> None:
     import analytics_mcp.server  # noqa: F401
     from analytics_mcp.coordinator import app
 
+    # stateless=True: every request is its own ephemeral session.
+    #
+    # This was stateless=False, and 2026-08-24 showed the cost. After the
+    # container was replaced by a redeploy, claude.ai kept sending the
+    # Mcp-Session-Id of the container that no longer existed; the Python SDK
+    # answers an unknown session with 400, the MCP spec says 404, and claude.ai
+    # only re-initializes on 404. Net effect: the connector is wedged until a
+    # human reconnects it by hand — on every single redeploy. See memory
+    # feedback_stale_session_after_redeploy.
+    #
+    # With no session state there is nothing to go stale, which is why dhl /
+    # powerbi / gmail / tiktok-organic / viral-loops never hit this.
     session_manager = StreamableHTTPSessionManager(
         app=app,
         event_store=None,
         json_response=False,
-        stateless=False,
+        stateless=True,
     )
 
     async def asgi_handler(scope, receive, send):  # type: ignore[no-untyped-def]

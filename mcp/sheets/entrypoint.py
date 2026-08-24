@@ -149,8 +149,25 @@ def main() -> None:
             "relying on FASTMCP_STREAMABLE_HTTP_PATH env instead"
         )
 
+    # stateless_http: every request is its own ephemeral session.
+    #
+    # FastMCP defaults to stateful, and 2026-08-24 showed the cost. After this
+    # container was replaced by a redeploy, claude.ai kept sending the
+    # Mcp-Session-Id of the container that no longer existed; the SDK answers an
+    # unknown session with 400 (visible as `"POST / HTTP/1.1" 400 Bad Request`
+    # in the logs), the MCP spec says 404, and claude.ai only re-initializes on
+    # 404. The connector stays wedged until a human reconnects it — on every
+    # redeploy. See memory feedback_stale_session_after_redeploy.
+    try:
+        mcp.settings.stateless_http = True
+    except AttributeError:  # pragma: no cover - SDK layout drift guard
+        logging.getLogger(__name__).error(
+            "could not set stateless_http on mcp.settings — this container will "
+            "wedge claude.ai connectors on every redeploy until reconnected"
+        )
+
     logging.getLogger(__name__).info(
-        "Google Sheets MCP starting on %s:%s (streamable-http, path=/)",
+        "Google Sheets MCP starting on %s:%s (streamable-http, path=/, stateless)",
         os.environ.get("HOST", "0.0.0.0"),
         os.environ.get("PORT", "8080"),
     )

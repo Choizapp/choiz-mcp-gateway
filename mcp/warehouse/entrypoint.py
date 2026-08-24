@@ -48,6 +48,14 @@ def _patched_init(self, *args, **kwargs):  # type: ignore[no-untyped-def]
     # settings.host later from --streamable-http-host anyway, so this
     # default is harmless.
     kwargs.setdefault("host", "0.0.0.0")
+    # Force stateless sessions. Nothing here needs per-session state, and
+    # keeping it costs a manual reconnect on every redeploy: claude.ai keeps
+    # sending the Mcp-Session-Id of the replaced container, the SDK answers an
+    # unknown session with 400, the spec says 404, and claude.ai only
+    # re-initializes on 404 — so the connector stays wedged. Hit on ga4 and
+    # sheets on 2026-08-24; this container is the same shape, fixed here before
+    # it bites. See memory feedback_stale_session_after_redeploy.
+    kwargs.setdefault("stateless_http", True)
     _orig_init(self, *args, **kwargs)
 
 
