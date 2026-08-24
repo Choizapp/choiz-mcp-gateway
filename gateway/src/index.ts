@@ -105,10 +105,21 @@ function makeAllowlistGuard(prefix: string) {
   const cfg = slugAllowlists[prefix];
   if (!cfg) return null;
   const allowed = parseAllowlist(process.env[cfg.env]);
+  // "*" = no per-slug narrowing: anyone the /mcp guard already accepted (i.e.
+  // any Google-verified user in ALLOWED_EMAIL_DOMAINS) gets through, exactly
+  // like every other slug. Deliberately an explicit opt-in rather than the
+  // meaning of an empty value — "unset" must never read as "allow all".
+  if (allowed.has("*")) {
+    console.log(
+      `[mcp-gateway] ${prefix}: ${cfg.env}="*" — open to all allowed domains`,
+    );
+    return null;
+  }
   if (allowed.size === 0) {
     console.warn(
       `[mcp-gateway] ${prefix}: ${cfg.env} is empty — route registered but ` +
-        `DENIED for every user. Set ${cfg.env} in .env to grant access.`,
+        `DENIED for every user. Set ${cfg.env} in .env to grant access ` +
+        `(or "*" for everyone in ALLOWED_EMAIL_DOMAINS).`,
     );
   } else {
     console.log(
