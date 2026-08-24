@@ -45,7 +45,7 @@ Agreed queue (see migration-order memory):
 - [ ] **tiktok-organic** — possible candidate. Status of the local config unknown (Santi unsure if it currently works). Verify before queueing.
 - [ ] **power-bi** — Santi flagged this as a priority on 2026-04-29 EOD: he wants Power BI usable from a Claude Code routine without Power BI Desktop being open. The `powerbi-modeling-mcp` we use today is local-bound (talks to localhost XMLA on Desktop). The right path is service-principal + Power BI Service XMLA endpoint (headless, server-side refresh token). Not a 1-hour task; needs an MCP that can target the Service endpoint, plus an Azure AD app registration. Research pending.
 - [ ] **google-ads** — last and conditional. Two compounding blockers (stateless tunnel storm + stateful supergateway #126). If revisited, **evaluate swapping the fork for a different google-ads MCP** rather than fighting the same one.
-- [~] **gmail** — code SCAFFOLDED 2026-08-24, awaiting console work + tokens (see §5 below). Read-only multi-mailbox access to `hola@choiz.com.mx` + `hi@gotimeless.ai` under a single slug `/mcp/gmail`. Not a migration off a local config — the native claude.ai Gmail connector cannot cover two accounts, which is why this exists.
+- [~] **gmail** — PR #56, awaiting merge (see §5 below). Read-only access to `hola@choiz.com.mx` + `hi@gotimeless.ai`, one connector per mailbox: `/mcp/gmail-choiz` + `/mcp/gmail-timeless`. Not a migration off a local config — the native claude.ai Gmail connector cannot cover two accounts, which is why this exists.
 
 For each one, decide whether it belongs on the gateway:
 
@@ -124,7 +124,8 @@ Not blocking, but worth doing eventually:
 ### 5. Gmail MCP — scaffolded 2026-08-24, NOT yet active
 
 Read-only access to the two shared inboxes (`hola@choiz.com.mx`,
-`hi@gotimeless.ai`) at a single slug `/mcp/gmail`. Code, compose service, CI job
+`hi@gotimeless.ai`) at one slug per mailbox: `/mcp/gmail-choiz` and
+`/mcp/gmail-timeless`, one claude.ai connector each. Code, compose service, CI job
 and env template are in; what is missing is Google-console work that cannot be
 automated from this repo.
 
@@ -156,17 +157,27 @@ ID authorized in each tenant's Admin Console with `gmail.readonly`, and swapping
 `mcp/gmail/entrypoint.py`. Nothing else in the design changes — the account map,
 tools and payload trimming are auth-agnostic.
 
-**Two deliberate deviations from house convention:**
+**One connector per mailbox** — `gmail_choiz_mcp` + `gmail_timeless_mcp` from one
+image, the same shape as facebook / instagram / ga4 / gsc / powerbi.
 
-1. *Single slug with an `account` argument*, not per-brand slugs like
-   `ga4-choiz`/`ga4-timeless`. Those split to stop the model picking the wrong
-   tenant; here the requirement is answering one question across BOTH inboxes in
-   a single call (`account="both"`), which two connectors make impossible.
-2. *A per-user allowlist on the gateway* (`GMAIL_ALLOWED_EMAILS`, new
-   `slugAllowlists` table in `gateway/src/index.ts`). Every other slug is open to
-   any user in `ALLOWED_EMAIL_DOMAINS`; for shared mailboxes that default would
-   let any employee who learns the URL read them. Fails closed: empty env ⇒ 403
-   for everyone plus a boot warning.
+This reverses an earlier call in this same PR. The first design used a single
+slug `/mcp/gmail` with an `account` argument, on the reasoning that two
+connectors cannot answer a cross-mailbox question. **That reasoning was wrong:**
+with both connectors enabled, Claude simply calls both in one turn; all that is
+lost is the server-side merge-and-sort, which is cosmetic. Weighed against that,
+per-mailbox containers buy real isolation — `gmail_timeless_mcp` is handed only
+the timeless credentials, so it cannot read the Choiz inbox even given a code
+bug — plus independent allowlists per mailbox and the house convention. The
+multi-mailbox mode still exists in the image and is exercised by tests; we just
+do not deploy it.
+
+**A per-user allowlist on the gateway** (`GMAIL_CHOIZ_ALLOWED_EMAILS` /
+`GMAIL_TIMELESS_ALLOWED_EMAILS`, new `slugAllowlists` table in
+`gateway/src/index.ts`) — the first in this gateway. Every other slug is open to
+any user in `ALLOWED_EMAIL_DOMAINS`; for shared mailboxes that default would let
+any employee who learns the URL read them. Fails closed: empty env ⇒ 403 for
+everyone plus a boot warning. Two independent lists so the mailboxes can have
+different readers. The mechanism is reusable for any future sensitive slug.
 
 **No write surface, and that is load-bearing.** Scope is `gmail.readonly`; there
 are no send/reply/label/trash tools and no attachment download, so unlike
@@ -188,13 +199,15 @@ that threat model first.
    default; the symptom is a 403 at tool-call time, not at consent time).
 3. Run `mcp/gmail/mint_token.py` once per mailbox from a laptop, signed in **as
    the shared inbox**. Paste the four printed lines into the EC2 `.env`.
-4. Set `GMAIL_ALLOWED_EMAILS`, restart the stack, and check `docker logs
-   gmail_mcp` for `auth ok` per mailbox.
-5. Add the connector in claude.ai: `https://mcp.choiz.com.mx/mcp/gmail/`.
+4. Set `GMAIL_CHOIZ_ALLOWED_EMAILS` + `GMAIL_TIMELESS_ALLOWED_EMAILS`, restart
+   the stack, and check `docker compose logs gmail_choiz_mcp gmail_timeless_mcp`
+   for `auth ok` in each.
+5. Add BOTH connectors in claude.ai: `https://mcp.choiz.com.mx/mcp/gmail-choiz/`
+   and `https://mcp.choiz.com.mx/mcp/gmail-timeless/`.
 
-Until step 3 the container is healthy but empty on purpose — a mailbox listed in
-`GMAIL_ACCOUNTS` with no credentials is skipped with a warning and every tool
-returns `not_configured`, rather than crashlooping on the shared EC2. A mailbox
+Until step 3 each container is healthy but empty on purpose — a mailbox with no
+credentials is skipped with a warning and every tool returns `not_configured`,
+rather than crashlooping on the shared EC2. A mailbox
 with *some* of its four vars set is a hard startup failure, since silently
 serving one inbox when the operator believes two are live is the worse outcome.
 

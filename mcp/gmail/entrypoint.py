@@ -41,9 +41,19 @@ Tool surface (4 tools, read-only):
   - get_thread(thread_id, account, ...)     : whole conversation, bodies opt-in
   - list_labels(account)                    : label ids/names
 
-`account` accepts "choiz", "timeless" or "both". Message and thread ids are
-mailbox-scoped, so get_message/get_thread require ONE account; search_messages
-tags every result with the account it came from.
+Deployment: ONE CONTAINER PER MAILBOX, matching the house per-brand pattern
+(facebook-choiz / ga4-timeless / powerbi-<brand>). `gmail_choiz_mcp` gets only
+choiz's four env vars and `gmail_timeless_mcp` only timeless's, so the Timeless
+container holds no credential that could reach the Choiz inbox even if the code
+were wrong. Slugs `/mcp/gmail-choiz` and `/mcp/gmail-timeless`, one claude.ai
+connector each. Cross-mailbox questions still work — Claude calls both
+connectors in the same turn; only the server-side merge is lost.
+
+The multi-mailbox mode (one container, several mailboxes, `account="both"`
+merging and sorting them) is still fully supported and is what the `account`
+argument is for. With a single mailbox configured the argument is redundant and
+may be omitted; `account="both"` resolves to that one mailbox rather than
+erroring.
 """
 from __future__ import annotations
 
@@ -59,6 +69,7 @@ import threading
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
+from google.auth.exceptions import RefreshError
 from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
@@ -219,7 +230,12 @@ def _resolve_one(account: str) -> Account:
     key = (account or "").strip().lower()
     if key in ACCOUNTS:
         return ACCOUNTS[key]
-    if key in ("both", "all", "*"):
+    if key in ("", "both", "all", "*"):
+        # Single-mailbox deployment (one container per brand): "both" and an
+        # omitted argument are unambiguous, so accept them instead of making the
+        # model name a mailbox it has no choice about.
+        if len(ACCOUNTS) == 1:
+            return next(iter(ACCOUNTS.values()))
         raise _UserError(
             "this tool needs exactly ONE account — Gmail message and thread ids "
             "are mailbox-scoped, so the same id means nothing in the other "
@@ -365,6 +381,24 @@ def _guard(fn: Callable[..., str]) -> Callable[..., str]:
             return fn(*args, **kwargs)
         except _UserError as exc:
             return _dump({"error": "bad_argument", "detail": str(exc)})
+        except RefreshError as exc:
+            # The likeliest production failure by far: the mailbox's refresh
+            # token was revoked (password change, admin action, app removed at
+            # myaccount.google.com/permissions) or the OAuth client was
+            # deleted. Give it its own error instead of burying it in
+            # internal_error with a stack trace — and log WITHOUT the exception
+            # payload, which can echo token material.
+            logger.error("%s: OAuth refresh failed — token likely revoked", fn.__name__)
+            return _dump(
+                {
+                    "error": "auth_expired",
+                    "detail": (
+                        "the refresh token for this mailbox no longer works. It has to "
+                        "be re-minted with mcp/gmail/mint_token.py; no retry or "
+                        "different argument will help."
+                    ),
+                }
+            )
         except HttpError as exc:
             status = getattr(getattr(exc, "resp", None), "status", None)
             logger.error("%s: gmail api error status=%s", fn.__name__, status)
@@ -391,26 +425,55 @@ def _guard(fn: Callable[..., str]) -> Callable[..., str]:
 
 # --- MCP server -----------------------------------------------------------
 
-# host="0.0.0.0" so the gateway reaches us across the docker bridge.
-# streamable_http_path="/" so the gateway can strip /mcp/gmail and forward "/".
-# stateless_http=True: ephemeral sessions, sidesteps stale-session-after-redeploy.
-mcp = FastMCP(
-    name="gmail",
-    instructions=(
-        "Read-only access to Choiz's shared inboxes: "
-        + (
-            ", ".join(f"{k} ({a.email})" for k, a in ACCOUNTS.items())
-            or "(none configured yet — every tool will say so)"
+def _server_name() -> str:
+    """`gmail-choiz` / `gmail-timeless` when this container serves one mailbox.
+
+    Production runs one container per mailbox, so the name carries the brand the
+    way powerbi-<brand> does — claude.ai shows it, and it keeps two connectors
+    distinguishable in the UI. Falls back to plain "gmail" for a multi-mailbox
+    container (still supported; see the account="both" paths).
+    """
+    if len(ACCOUNTS) == 1:
+        return f"gmail-{ACCOUNT_KEYS[0]}"
+    return "gmail"
+
+
+def _instructions() -> str:
+    if not ACCOUNTS:
+        mailboxes = "(none configured yet — every tool will say so)"
+    else:
+        mailboxes = ", ".join(f"{k} ({a.email})" for k, a in ACCOUNTS.items())
+    text = f"Read-only access to Choiz shared inbox(es): {mailboxes}. "
+    if len(ACCOUNTS) == 1:
+        # One mailbox: the `account` argument is noise here. Say so, or the
+        # model wastes a turn guessing a value that has no alternative.
+        text += (
+            "This connector serves that ONE mailbox, so you can omit the "
+            "`account` argument entirely. "
         )
-        + ". Every tool takes an `account` argument; search_messages and "
-        "list_labels also accept account='both' to cover all mailboxes in one "
-        "call. `query` uses native Gmail search syntax (from:, to:, subject:, "
+    else:
+        text += (
+            "Every tool takes an `account` argument; search_messages and "
+            "list_labels also accept account='both' to cover all mailboxes in "
+            "one call. "
+        )
+    return text + (
+        "`query` uses native Gmail search syntax (from:, to:, subject:, "
         "is:unread, has:attachment, after:2026/08/01, label:...). Start with "
         "search_messages — it returns headers plus a snippet, which usually "
         "answers the question; only call get_message/get_thread with "
         "include_body=true when the actual text matters. This server cannot "
         "send, reply, label, delete, or download attachments."
-    ),
+    )
+
+
+# host="0.0.0.0" so the gateway reaches us across the docker bridge.
+# streamable_http_path="/" so the gateway can strip /mcp/gmail-<brand> and
+#   forward "/".
+# stateless_http=True: ephemeral sessions, sidesteps stale-session-after-redeploy.
+mcp = FastMCP(
+    name=_server_name(),
+    instructions=_instructions(),
     host="0.0.0.0",
     port=8080,
     streamable_http_path="/",
@@ -503,7 +566,7 @@ def search_messages(
 @_guard
 def get_message(
     message_id: str,
-    account: str,
+    account: str = "both",
     include_body: bool = False,
     max_body_chars: int = DEFAULT_BODY_CHARS,
 ) -> str:
@@ -551,7 +614,7 @@ def get_message(
 @_guard
 def get_thread(
     thread_id: str,
-    account: str,
+    account: str = "both",
     include_bodies: bool = False,
     max_body_chars: int = 2_000,
 ) -> str:

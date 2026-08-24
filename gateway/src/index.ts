@@ -56,13 +56,15 @@ const upstreams: Record<string, string | undefined> = {
   // per-campaign apiToken. The campaign IS the token, so there is no campaignId
   // argument on any tool. Only GET endpoints are exposed.
   "/mcp/viral-loops":          process.env.UPSTREAM_VIRAL_LOOPS,
-  // Gmail MCP — READ-ONLY access to the shared inboxes (hola@choiz.com.mx +
-  // hi@gotimeless.ai). Single slug with an `account` argument instead of the
-  // per-brand slugs used by ga4 / gsc / powerbi: the requirement is answering
-  // one question across BOTH inboxes in a single call, which two connectors
-  // cannot do. Also the only slug with a per-user allowlist on top of the
-  // domain check — see slugAllowlists below.
-  "/mcp/gmail":                process.env.UPSTREAM_GMAIL,
+  // Gmail MCP — READ-ONLY access to the shared inboxes. Per-brand slugs like
+  // ga4 / gsc / powerbi / facebook: one container per mailbox, each holding
+  // ONLY its own credentials, so the timeless container cannot reach the Choiz
+  // inbox even if the code were wrong. Cross-mailbox questions still work —
+  // Claude calls both connectors in the same turn.
+  // The only slugs with a per-user allowlist on top of the domain check; the
+  // two lists are independent so the mailboxes can have different readers.
+  "/mcp/gmail-choiz":          process.env.UPSTREAM_GMAIL_CHOIZ,
+  "/mcp/gmail-timeless":       process.env.UPSTREAM_GMAIL_TIMELESS,
 };
 
 // --- Per-slug email allowlists (second gate, on top of the domain check) ---
@@ -80,7 +82,8 @@ interface SlugAllowlist {
   required: boolean;
 }
 const slugAllowlists: Record<string, SlugAllowlist> = {
-  "/mcp/gmail": { env: "GMAIL_ALLOWED_EMAILS", required: true },
+  "/mcp/gmail-choiz": { env: "GMAIL_CHOIZ_ALLOWED_EMAILS", required: true },
+  "/mcp/gmail-timeless": { env: "GMAIL_TIMELESS_ALLOWED_EMAILS", required: true },
 };
 
 function parseAllowlist(raw: string | undefined): Set<string> {
