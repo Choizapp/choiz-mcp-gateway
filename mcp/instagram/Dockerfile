@@ -42,7 +42,7 @@
 
 FROM python:3.12-slim
 
-ARG INSTAGRAM_MCP_SHA=fe6e3230e7d046da4fcd783dfbe52f4193b7944f
+ARG INSTAGRAM_MCP_SHA=d743022161c412dce08e39d679672378f6290894
 
 # git: fetch source at build time. ca-certificates: HTTPS to graph.facebook.com.
 RUN apt-get update \
