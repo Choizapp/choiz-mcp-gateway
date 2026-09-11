@@ -1,27 +1,28 @@
-# Warehouse MCP — postgres-mcp with native Streamable HTTP transport.
+# Warehouse MCP — postgres-mcp on the mcp 2.x SDK (protocol revision 2026-07-28).
 #
-# History: previously this image bundled supergateway to translate stdio
-# (postgres-mcp's only transport in v0.3.0) to MCP Streamable HTTP. That
-# combination caused a child-process leak: each request to the gateway
-# spawned a new postgres-mcp Python child, but supergateway in --stateless
-# mode did not reap them on completion. Containers grew to 2.5+ GB of RAM
-# after a few queries (9 zombie postgres-mcp processes × ~280 MB each),
-# eventually starving the host of memory and triggering the recurring
-# "tunnel zombie" pattern documented in MEMORY.md / project_tunnel_zombie_*.
+# History
+# -------
+# 2026-05-06: dropped supergateway for postgres-mcp's native streamable-http
+# transport (commit 07eb329c), which fixed a child-process leak that grew
+# containers to 2.5+ GB of RAM.
 #
-# Fix (2026-05-06): postgres-mcp's main branch (commit 07eb329c, Jan 2026)
-# added a native streamable-http transport via mcp.server.fastmcp's
-# run_streamable_http_async(). This eliminates the supergateway hop entirely:
-# one persistent Python process serves all requests in-band. No more child
-# zombies; Python's GC reclaims per-query allocations cleanly.
+# 2026-08-24: an unrelated compose.yml change rebuilt all 16 images, this one
+# resolved a newer mcp SDK that no longer exposed `mcp.server.fastmcp`, and the
+# container crashlooped with ModuleNotFoundError. Fixed by pinning mcp==1.25.0 —
+# i.e. the image had only ever been accidentally reproducible.
 #
-# We pin to the exact commit 07eb329c rather than a moving branch so builds
-# are reproducible. When upstream publishes 0.4.0+ on PyPI we can switch back
-# to a versioned pip install.
+# 2026-09-11: that pin became the outage. MCP revision 2026-07-28 removed the
+# initialize handshake and protocol sessions, added the mandatory
+# `server/discover` RPC, and moved the protocol version into a `params._meta`
+# envelope. claude.ai switched to it during the day; mcp 1.25.0 tops out at
+# 2025-11-25 and answers with HTTP 400, which the client reports as
+# "Connection closed" on every tool call. No 1.x release speaks 2026-07-28 —
+# support exists only in 2.x, where FastMCP was renamed MCPServer. See
+# mcp/warehouse/entrypoint.py for the bridge and docs/NEXT_STEPS.md for the
+# fleet-wide migration status.
 
 FROM python:3.12-slim
 
-# Just curl + ca-certs for any HTTPS deps the wheel pull may need.
 RUN apt-get update \
  && apt-get install -y --no-install-recommends ca-certificates curl git \
  && apt-get clean \
@@ -30,36 +31,31 @@ RUN apt-get update \
 RUN python -m venv /opt/venv
 ENV PATH="/opt/venv/bin:${PATH}"
 
-# Pin to the commit that introduced --transport streamable-http support.
-# https://github.com/crystaldba/postgres-mcp/commit/07eb329c
-#
-# `mcp` is pinned EXPLICITLY even though postgres-mcp pulls it transitively.
-# Outage 2026-08-24: an unrelated compose.yml change rebuilt all 16 images, this
-# one resolved a newer mcp SDK that no longer exposes `mcp.server.fastmcp`, and
-# the container crashlooped with ModuleNotFoundError. The old container had been
-# running fine for months on a version resolved at its original build — i.e. the
-# image was only accidentally reproducible. 1.25.0 matches the rest of the stack
-# (dhl / powerbi / gmail / instagram / facebook / tiktok-organic / viral-loops).
+# postgres-mcp is pinned to the commit that introduced streamable-http support.
+# It declares `mcp[cli]>=1.25.0,<2.0`, so install it first and then force the
+# 2.x SDK over the top: upstream's cap is what this image exists to bypass.
+# Both versions stay pinned EXACTLY — a floating resolve is what broke this
+# image on 2026-08-24.
 RUN pip install --no-cache-dir \
-    'git+https://github.com/crystaldba/postgres-mcp.git@07eb329c' \
-    'mcp==1.25.0'
-
-# Fail the BUILD, not production, if the SDK layout entrypoint.py monkey-patches
-# ever moves again. This is the exact import that broke on 2026-08-24; a
-# crashlooping container discovered by a user is the expensive way to learn it.
-RUN python -c "import mcp.server.fastmcp; import postgres_mcp; print('import check OK')"
+    'git+https://github.com/crystaldba/postgres-mcp.git@07eb329c'
+RUN pip install --no-cache-dir --upgrade 'mcp[cli]==2.2.0'
 
 COPY entrypoint.py /opt/entrypoint.py
 
+# Fail the BUILD, not production, if the SDK layout moves again. This executes
+# entrypoint.py's module body (not main()), so it exercises the real bridge:
+# the mcp.server.fastmcp stand-in, the transport patch, and postgres_mcp's
+# import through it. A bare `import postgres_mcp` would fail here by design -
+# it resolves the old FastMCP name that only the shim provides.
+# Keep the check ASCII-only: the image has no locale, so printing a non-ASCII
+# character raises UnicodeEncodeError and fails the build for the wrong reason.
+RUN python -c "import importlib.util; from mcp_types.version import KNOWN_PROTOCOL_VERSIONS as K; assert '2026-07-28' in K, K; spec=importlib.util.spec_from_file_location('wh','/opt/entrypoint.py'); m=importlib.util.module_from_spec(spec); spec.loader.exec_module(m); assert callable(m.main); print('import check OK, protocols:', K)"
+
 EXPOSE 8080
 
-# We invoke postgres-mcp through entrypoint.py so we can monkey-patch
-# FastMCP.__init__ in place to default streamable_http_path="/". The
-# patch is applied to the original class (NOT a subclass) so generic
-# parameterisation `FastMCP[X]` keeps working — that's the trap that
-# bit us in the previous attempt.
-#
-# DATABASE_URI is read from env by postgres-mcp.
+# entrypoint.py shims mcp.server.fastmcp -> MCPServer and supplies the
+# transport kwargs (host/port/path/stateless), which in 2.x no longer live in
+# Settings. DATABASE_URI is read from env by postgres-mcp.
 # --access-mode=restricted blocks DML/DDL; only SELECT/EXPLAIN are allowed.
 ENTRYPOINT ["python", "/opt/entrypoint.py"]
 CMD [ \
