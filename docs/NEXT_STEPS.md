@@ -23,6 +23,53 @@ Snapshot of where this project is and what's left to do. Update this file whenev
 - **CI/CD live** (deployed 2026-04-26). GitHub Actions builds ARM64 images → pushes to GHCR → SSM pushes `compose.yml` to EC2 + `docker compose pull && up -d`. EC2 no longer builds anything. See [CICD.md](CICD.md).
 - Pilot user: `sabruzzini@choiz.com.mx`.
 
+## OUTAGE 2026-09-11 - MCP revision 2026-07-28 (fleet-wide, IN PROGRESS)
+
+**Symptom:** every `mcp.choiz.com.mx` connector returns "Connection closed" on every tool
+call, while the connector still shows as Connected with its full tool list. Third-party
+connectors (Figma, Google Calendar) are unaffected.
+
+**Root cause:** MCP protocol revision
+[2026-07-28](https://modelcontextprotocol.io/specification/2026-07-28/changelog) removed the
+`initialize`/`notifications/initialized` handshake, removed protocol-level sessions and the
+`Mcp-Session-Id` header, made `server/discover` mandatory, and moved the protocol version
+into a `params._meta` envelope. claude.ai switched to it during 2026-09-11 (last successful
+tool calls: sheets 15:24, ga4 18:23, warehouse 19:08 UTC). Our images pin `mcp==1.25.0`,
+which tops out at 2025-11-25 and answers the new revision with a bare HTTP 400.
+
+The periodic legacy re-handshake still succeeds, which is why the connectors look healthy:
+container logs show a recurring `400` as the FIRST request of each reconnect cycle, followed
+by a successful `initialize` + `tools/list`.
+
+**Nothing on our side changed.** Containers had been up 2 weeks; the tunnel, gateway, Worker
+and RDS all verified healthy during the incident.
+
+**Why it is not a pin bump:** no `mcp` 1.x release speaks 2026-07-28 (verified 1.25.0,
+1.27.2, 1.28.1, 1.29.1, 1.30.0 - all cap at 2025-11-25). Support exists only in 2.x, which
+renamed `FastMCP` to `MCPServer`; `mcp.server.fastmcp` now raises ModuleNotFoundError.
+Upstream `postgres-mcp` deliberately pins `mcp[cli]<2.0` (commit 15c8e333, 2026-08-16) and
+its last release is v0.3.0 (May 2025), so it will not fix this for us.
+
+**Done:** `warehouse` migrated to `mcp[cli]==2.2.0` with a bridge shim in
+`mcp/warehouse/entrypoint.py` (stand-in `mcp.server.fastmcp` module + transport kwargs,
+which moved out of Settings in 2.x). Verified against the live RDS before deploy:
+`server/discover` -> `supportedVersions: ["2026-07-28"]`, `tools/call execute_sql` returns
+rows on the modern envelope, through the gateway's rewritten `Host: warehouse_mcp:8080`,
+and the legacy stateless path still answers `tools/list` without a session.
+
+**Still to do:**
+
+- Migrate the other 15 MCPs the same way. Each needs its own check: the shim assumes the
+  server imports `FastMCP` and calls `run_streamable_http_async()`; supergateway-wrapped
+  MCPs (meta-ads, facebook, instagram, tiktok, viral-loops) have a different shape.
+- Review the Worker for the new Dynamic Client Registration `application_type` requirement
+  (SEP-837), and note that DCR itself is now deprecated in favour of Client ID Metadata
+  Documents.
+- `monitor-worker.yml` never exercises an authenticated tool call, so it stayed green
+  through the whole outage. Add a probe that does a real `tools/call`.
+- `list_schemas` on warehouse returns ~400 `pg_temp_*` / `pg_toast_temp_*` system schemas.
+  Filter them; it is a large useless payload on every call.
+
 ## Not started / next up
 
 Ordered by impact vs. effort.

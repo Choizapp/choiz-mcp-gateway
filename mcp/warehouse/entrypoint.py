@@ -1,71 +1,103 @@
-"""Warehouse MCP entrypoint that patches FastMCP to serve at "/" instead of "/mcp".
+"""Warehouse MCP entrypoint, bridging postgres-mcp onto the mcp 2.x SDK.
 
-Why this exists:
-  FastMCP (mcp 1.25.0) hard-codes ``streamable_http_path: str = "/mcp"`` as a
-  default in its ``__init__`` signature. When postgres-mcp calls
-  ``FastMCP(name=...)`` without specifying that kwarg, the function-level
-  default propagates into Settings as an explicit kwarg, which has higher
-  precedence than environment variables in pydantic-settings — so setting
-  ``FASTMCP_STREAMABLE_HTTP_PATH=/`` in the container env does NOT work.
+Why this exists
+---------------
+MCP protocol revision 2026-07-28 removed the ``initialize`` /
+``notifications/initialized`` handshake, removed protocol-level sessions and
+the ``Mcp-Session-Id`` header, and made ``server/discover`` mandatory. Every
+request now carries its protocol version in a ``params._meta`` envelope
+(``io.modelcontextprotocol/protocolVersion``).
 
-  Without overriding the path, FastMCP serves at ``/mcp`` and issues a 307
-  redirect for any request to ``/`` whose Location header references the
-  internal Docker hostname (``http://warehouse_mcp:8080/mcp``), which is
-  unreachable from claude.ai.
+claude.ai started speaking it on 2026-09-11. An mcp 1.x server answers those
+requests with a bare HTTP 400 (it only knows revisions up to 2025-11-25), which
+the client surfaces as "Connection closed" on every tool call — while the
+periodic legacy re-handshake still succeeds, so the connector keeps *looking*
+healthy with its tool list intact. That is the outage this file fixes.
 
-Workaround:
-  Replace ``FastMCP.__init__`` in-place to inject ``streamable_http_path="/"``
-  as a kwarg default. We must NOT subclass: ``FastMCP`` is a Generic
-  (``FastMCP[LifespanResultT]``) and any plain subclass loses the generic
-  parameterisation, which breaks postgres-mcp's runtime type evaluation
-  with ``TypeError: <class '__main__._FastMCPRootPath'> is not a generic class``
-  when pydantic resolves forward refs in field annotations.
+Support for 2026-07-28 landed only in mcp 2.x, which renamed ``FastMCP`` to
+``MCPServer``; ``mcp.server.fastmcp`` now raises ModuleNotFoundError pointing at
+the migration guide. postgres-mcp is still pinned to ``mcp[cli]<2.0`` upstream
+(commit 15c8e333, 2026-08-16, "prevent breaking import change") and imports the
+old name, so we bridge it here rather than forking a project whose last release
+is v0.3.0 (May 2025).
 
-Switch back to the upstream CLI when one of these lands:
-  - postgres-mcp 0.4.0 with a CLI flag like ``--streamable-http-path``,
-  - or mcp SDK changes ``streamable_http_path`` so its env var actually wins.
+Two patches, both applied IN PLACE on the original class — ``MCPServer`` is a
+Generic (``MCPServer[LifespanResultT]``) and a plain subclass loses the generic
+parameterisation, which breaks pydantic's forward-ref resolution at runtime.
+That is the trap that bit the 1.x version of this file:
 
-See: https://github.com/crystaldba/postgres-mcp/blob/07eb329c/src/postgres_mcp/server.py
+  1. Register a stand-in ``mcp.server.fastmcp`` module exporting
+     ``FastMCP = MCPServer`` BEFORE postgres_mcp is imported, so its
+     module-level ``@mcp.tool`` decorators still register.
+
+  2. Default the transport kwargs. In 2.x host/port/path/statelessness moved
+     OUT of ``Settings`` and INTO explicit keyword arguments on
+     ``run_streamable_http_async``, so postgres-mcp's ``mcp.settings.host = ...``
+     no longer has anywhere to land (the fields do not exist and pydantic
+     raises on unknown attribute assignment). We swallow those writes and
+     supply the values here.
+
+Verified against the live warehouse RDS before deploy: ``server/discover``
+returns ``supportedVersions: ["2026-07-28"]``, and ``tools/call execute_sql``
+returns rows both on the modern envelope and through the gateway's rewritten
+``Host: warehouse_mcp:8080`` header.
+
+Drop this shim when postgres-mcp ships native 2.x support.
 """
+
 from __future__ import annotations
 
 import asyncio
+import sys
+import types as _pytypes
 
-import mcp.server.fastmcp as _fastmcp_pkg
+from mcp.server.mcpserver import MCPServer
 
-_orig_init = _fastmcp_pkg.FastMCP.__init__
+# --- 1. Stand-in for the removed mcp.server.fastmcp module -------------------
+_shim = _pytypes.ModuleType("mcp.server.fastmcp")
+_shim.FastMCP = MCPServer  # type: ignore[attr-defined]
+sys.modules["mcp.server.fastmcp"] = _shim
+
+# --- 2. Transport defaults ---------------------------------------------------
+_orig_run = MCPServer.run_streamable_http_async
 
 
-def _patched_init(self, *args, **kwargs):  # type: ignore[no-untyped-def]
-    # Force streamable-http path "/" (see module docstring).
-    kwargs.setdefault("streamable_http_path", "/")
-    # Force host "0.0.0.0" so FastMCP's auto-enabled DNS rebinding
-    # protection (triggered for localhost/127.0.0.1/::1) does NOT engage.
-    # Otherwise transport_security rejects requests whose Host header
-    # is "warehouse_mcp:8080" (the value http-proxy-middleware sets when
-    # the gateway uses changeOrigin: true) with HTTP 421 Misdirected
-    # Request / "Invalid Host header". postgres-mcp overrides
-    # settings.host later from --streamable-http-host anyway, so this
-    # default is harmless.
+async def _patched_run(self, **kwargs):  # type: ignore[no-untyped-def]
+    # 2.x defaults are 127.0.0.1:8000 at path "/mcp". We need 0.0.0.0:8080 at
+    # "/" so the gateway can reach the container by service name and proxy
+    # without a 307 to an internal Docker hostname claude.ai cannot resolve.
     kwargs.setdefault("host", "0.0.0.0")
-    # Force stateless sessions. Nothing here needs per-session state, and
-    # keeping it costs a manual reconnect on every redeploy: claude.ai keeps
-    # sending the Mcp-Session-Id of the replaced container, the SDK answers an
-    # unknown session with 400, the spec says 404, and claude.ai only
-    # re-initializes on 404 — so the connector stays wedged. Hit on ga4 and
-    # sheets on 2026-08-24; this container is the same shape, fixed here before
-    # it bites. See memory feedback_stale_session_after_redeploy.
+    kwargs.setdefault("port", 8080)
+    kwargs.setdefault("streamable_http_path", "/")
+    # Sessions only exist on the legacy (<= 2025-11-25) transport, which older
+    # clients still use. Keeping it stateless costs a manual reconnect on every
+    # redeploy otherwise: the client keeps sending the Mcp-Session-Id of the
+    # replaced container, the SDK answers an unknown session with 400, the spec
+    # says 404, and claude.ai only re-initializes on 404 — so the connector
+    # stays wedged. See memory feedback_stale_session_after_redeploy.
     kwargs.setdefault("stateless_http", True)
-    _orig_init(self, *args, **kwargs)
+    return await _orig_run(self, **kwargs)
 
 
-# Replace __init__ in place; the class object stays the same so
-# ``FastMCP[X]`` generic parameterisation continues to work.
-_fastmcp_pkg.FastMCP.__init__ = _patched_init  # type: ignore[method-assign]
+MCPServer.run_streamable_http_async = _patched_run  # type: ignore[method-assign]
 
-# Now import postgres-mcp; its ``server`` module evaluates
-# ``from mcp.server.fastmcp import FastMCP`` at load time and gets the
-# (in-place-patched) class.
+# postgres-mcp writes mcp.settings.host / .port before calling the runner.
+# Those fields are gone in 2.x; swallow the writes (values come from
+# _patched_run above) instead of letting pydantic raise at startup.
+_SettingsType = type(MCPServer(name="_probe").settings)
+_orig_setattr = _SettingsType.__setattr__
+
+
+def _lenient_setattr(self, name, value):  # type: ignore[no-untyped-def]
+    if name in {"host", "port"}:
+        return
+    _orig_setattr(self, name, value)
+
+
+_SettingsType.__setattr__ = _lenient_setattr  # type: ignore[method-assign]
+
+# Import AFTER the shim is in place: postgres_mcp.server resolves
+# ``from mcp.server.fastmcp import FastMCP`` at module load time.
 from postgres_mcp.server import main  # noqa: E402
 
 
