@@ -90,6 +90,47 @@ jobs:
           echo "=== RAW (primeros 3000 chars) ==="
           head -c 3000 /tmp/tail.json || true
 
+      - name: KV write history (por que se agota la cuota, y desde cuando)
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        run: |
+          set +e
+          ACC=762c1f9f78781abc984d56c18185af3a
+          NS=9f2f4efa91a54ec2ae05aa28c43b27c0
+          GQL=https://api.cloudflare.com/client/v4/graphql
+          AUTH="Authorization: Bearer $CLOUDFLARE_API_TOKEN"
+
+          echo "=== plan de la cuenta ==="
+          curl -s -H "$AUTH" "https://api.cloudflare.com/client/v4/accounts/$ACC" | head -c 600; echo
+          echo "=== subscripciones ==="
+          curl -s -H "$AUTH" "https://api.cloudflare.com/client/v4/accounts/$ACC/subscriptions" | head -c 600; echo
+
+          echo "=== operaciones KV por dia y tipo (ultimos 45 dias) ==="
+          cat > /tmp/q.json <<JSON
+          {"query":"{ viewer { accounts(filter: {accountTag: \"$ACC\"}) { kvOperationsAdaptiveGroups(filter: {date_geq: \"2026-07-28\", date_leq: \"2026-09-11\"}, limit: 2000, orderBy: [date_ASC]) { sum { requests } dimensions { date actionType } } } } }"}
+JSON
+          curl -s -X POST "$GQL" -H "$AUTH" -H 'content-type: application/json' --data @/tmp/q.json > /tmp/kv.json
+          head -c 300 /tmp/kv.json; echo
+          echo "--- writes por dia ---"
+          python3 - <<'PY'
+          import json
+          try:
+              d=json.load(open('/tmp/kv.json'))
+              accs=d.get('data',{}).get('viewer',{}).get('accounts',[])
+              if not accs:
+                  print('sin datos; errors=', json.dumps(d.get('errors'))[:400]); raise SystemExit
+              rows=accs[0].get('kvOperationsAdaptiveGroups',[])
+              agg={}
+              for r in rows:
+                  dim=r['dimensions']; agg.setdefault(dim['date'],{})[dim['actionType']]=r['sum']['requests']
+              for day in sorted(agg):
+                  w=agg[day].get('write',0)+agg[day].get('delete',0)
+                  print(f"{day}  write={agg[day].get('write',0):>6}  delete={agg[day].get('delete',0):>5}  read={agg[day].get('read',0):>7}  list={agg[day].get('list',0):>4}  -> facturable(w+d)={w}")
+          except Exception as e:
+              print('error parseando:', e)
+          PY
+          echo "HIST_FIN"
+
       - name: KV diagnostics
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
