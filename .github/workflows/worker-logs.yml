@@ -1,0 +1,91 @@
+name: Tail worker logs
+
+# Ops escape hatch: stream the Cloudflare Worker's live logs (including
+# uncaught exceptions) while hitting an endpoint, and print what came back.
+# The Worker equivalent of run-ssm.yml — `observability` is already enabled in
+# wrangler.jsonc, but nothing in this repo could read the output without a
+# Cloudflare login. Added 2026-09-11 while debugging /register returning HTTP
+# 500 (Cloudflare error 1101 = uncaught exception), the failure behind ops
+# issue #62 that blocks every connector sign-in.
+#
+# WHO CAN TRIGGER: anyone with write access. AUDIT: every run is an Actions run.
+# Reuses CLOUDFLARE_API_TOKEN, the same secret deploy-worker.yml already uses.
+
+on:
+  workflow_dispatch:
+    inputs:
+      probe_path:
+        description: 'Path to hit while tailing (e.g. /register). Empty = just listen.'
+        required: false
+        default: '/register'
+        type: string
+      probe_method:
+        description: 'HTTP method for the probe'
+        required: false
+        default: 'POST'
+        type: string
+      seconds:
+        description: 'How long to tail (max 120)'
+        required: false
+        default: '45'
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: worker-logs
+  cancel-in-progress: false
+
+jobs:
+  tail:
+    name: wrangler tail
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: worker
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: worker/package-lock.json
+      - run: npm ci
+      - name: Tail while probing
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          PROBE_PATH: ${{ inputs.probe_path }}
+          PROBE_METHOD: ${{ inputs.probe_method }}
+          SECONDS_TO_TAIL: ${{ inputs.seconds }}
+        run: |
+          set -uo pipefail
+          secs="${SECONDS_TO_TAIL:-45}"
+          [ "$secs" -gt 120 ] 2>/dev/null && secs=120
+          # --format json keeps exceptions structured; tail needs a moment to
+          # attach before the probe fires, or the event is missed entirely.
+          npx wrangler tail --format json > /tmp/tail.json 2>/tmp/tail.err &
+          tail_pid=$!
+          sleep 12
+          if [ -n "$PROBE_PATH" ]; then
+            echo "Probing ${PROBE_METHOD} https://mcp.choiz.com.mx${PROBE_PATH}"
+            curl -s -o /tmp/probe.out -w 'probe HTTP %{http_code}\n' \
+              -X "${PROBE_METHOD}" "https://mcp.choiz.com.mx${PROBE_PATH}" \
+              -H 'content-type: application/json' \
+              -d '{"client_name":"worker-logs-probe","redirect_uris":["https://claude.ai/api/mcp/auth_callback"],"grant_types":["authorization_code","refresh_token"],"response_types":["code"],"token_endpoint_auth_method":"none"}' \
+              --max-time 25 || true
+            echo "--- probe response body ---"
+            head -c 500 /tmp/probe.out || true
+            echo
+          fi
+          sleep "$secs"
+          kill "$tail_pid" 2>/dev/null || true
+          echo "::group::wrangler stderr"
+          head -40 /tmp/tail.err || true
+          echo "::endgroup::"
+          echo "=== EXCEPTIONS ==="
+          grep -o '"exceptions":\[[^]]*\]' /tmp/tail.json | grep -v '"exceptions":\[\]' | head -20 || echo "(ninguna capturada)"
+          echo "=== LOGS ==="
+          grep -o '"logs":\[[^]]*\]' /tmp/tail.json | grep -v '"logs":\[\]' | head -20 || echo "(ninguno)"
+          echo "=== RAW (primeros 3000 chars) ==="
+          head -c 3000 /tmp/tail.json || true
