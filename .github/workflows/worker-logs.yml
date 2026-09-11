@@ -94,22 +94,29 @@ jobs:
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
         run: |
-          set -uo pipefail
+          # set +e is REQUIRED: GitHub runs steps with `bash -e`, so a failing
+          # write aborts the step before printing the error we came for.
+          set +e
           NS=9f2f4efa91a54ec2ae05aa28c43b27c0
           # --remote is REQUIRED: wrangler v4 kv commands operate on LOCAL
           # miniflare state by default, which always looks empty in CI.
-          echo "=== namespaces ==="
-          npx wrangler kv namespace list 2>&1 | head -20
-          echo "=== READ remoto: claves en OAUTH_KV (primeras) ==="
-          npx wrangler kv key list --remote --namespace-id "$NS" 2>&1 | head -c 1500
+          echo "=== WRITE remoto (salida completa) ==="
+          npx wrangler kv key put --remote --namespace-id "$NS" "diag:probe" "ok" 2>&1 | tail -30
+          echo "--- fin write ---"
+          echo "=== permisos del token ==="
+          curl -s -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" \
+            "https://api.cloudflare.com/client/v4/user/tokens/verify" | head -c 400
           echo
-          echo "=== conteo aproximado de claves ==="
-          npx wrangler kv key list --remote --namespace-id "$NS" 2>/dev/null | grep -c '"name"' || echo "0 / error"
-          echo "=== WRITE remoto ==="
-          npx wrangler kv key put --remote --namespace-id "$NS" "diag:probe" "ok" 2>&1 | tail -5
-          echo "write_exit=$?"
-          echo "=== READ BACK remoto ==="
-          npx wrangler kv key get --remote --namespace-id "$NS" "diag:probe" 2>&1 | tail -3
-          echo "read_exit=$?"
-          echo "=== limpieza ==="
-          npx wrangler kv key delete --remote --namespace-id "$NS" "diag:probe" 2>&1 | tail -2
+          echo "=== write por REST API (error crudo de Cloudflare) ==="
+          ACC=$(curl -s -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" \
+            "https://api.cloudflare.com/client/v4/accounts" \
+            | grep -o '"id":"[0-9a-f]*"' | head -1 | cut -d'"' -f4)
+          echo "account_id_detectado=${ACC:-ninguno}"
+          if [ -n "$ACC" ]; then
+            curl -s -X PUT \
+              "https://api.cloudflare.com/client/v4/accounts/$ACC/storage/kv/namespaces/$NS/values/diag:probe2" \
+              -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" \
+              -F "value=ok" -F "metadata={}" | head -c 900
+            echo
+          fi
+          echo "DIAG_FIN"
