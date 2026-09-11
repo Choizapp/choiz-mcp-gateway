@@ -8,6 +8,15 @@
 # mcp.server.lowlevel.Server (NOT FastMCP). Tools return Sequence[TextContent],
 # so the str-return primitive bug we hit on facebook does NOT apply here.
 #
+# 2026-09-11 (fork PR #1): the fork also serves COMPETITOR research through the
+# Graph API business_discovery edge — get_competitor_profile /
+# get_competitor_posts / get_competitor_post / compare_competitors, all
+# read-only against OTHER accounts' public data. Same token, same container, no
+# new slug. Requires instagram_manage_insights + pages_read_engagement on the
+# token; the edge is keyed by USERNAME (there is no lookup by post URL) and only
+# sees public Business/Creator accounts. Details in the fork's
+# src/business_discovery.py docstring.
+#
 # History: previously bundled Node + supergateway to translate the MCP's
 # stdio transport into MCP Streamable HTTP. Same supergateway --stateless
 # leak that hit warehouse (2026-05-06) and facebook (2026-05-07): each
@@ -33,7 +42,7 @@
 
 FROM python:3.12-slim
 
-ARG INSTAGRAM_MCP_SHA=1c01c4d3b001b9d3b147f58ef948a2bba11cbdf9
+ARG INSTAGRAM_MCP_SHA=fe6e3230e7d046da4fcd783dfbe52f4193b7944f
 
 # git: fetch source at build time. ca-certificates: HTTPS to graph.facebook.com.
 RUN apt-get update \
