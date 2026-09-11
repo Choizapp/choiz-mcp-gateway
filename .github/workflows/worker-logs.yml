@@ -110,8 +110,15 @@ jobs:
           # YAML block scalar and silently breaks the whole workflow (GitHub
           # then reports "does not have workflow_dispatch trigger"). Build the
           # payload with printf and parse with a single-line python3 -c.
-          Q='{ viewer { accounts(filter: {accountTag: \"ACCTAG\"}) { kvOperationsAdaptiveGroups(filter: {date_geq: \"2026-07-28\", date_leq: \"2026-09-12\"}, limit: 2000, orderBy: [date_ASC]) { sum { requests } dimensions { date actionType } } } } }'
+          # Cloudflare caps analytics queries at 4w4d (32 days), so the window
+          # has to be computed, not hardcoded, or the query is rejected outright.
+          FROM=$(date -u -d '31 days ago' +%Y-%m-%d)
+          TO=$(date -u +%Y-%m-%d)
+          echo "ventana: $FROM -> $TO"
+          Q='{ viewer { accounts(filter: {accountTag: \"ACCTAG\"}) { kvOperationsAdaptiveGroups(filter: {date_geq: \"FROMD\", date_leq: \"TOD\"}, limit: 2000, orderBy: [date_ASC]) { sum { requests } dimensions { date actionType } } } } }'
           Q=${Q//ACCTAG/$ACC}
+          Q=${Q//FROMD/$FROM}
+          Q=${Q//TOD/$TO}
           printf '{"query":"%s"}' "$Q" > payload.json
           curl -s -X POST "$GQL" -H "$AUTH" -H 'content-type: application/json' --data @payload.json > kv.json
           echo "--- respuesta cruda (300) ---"; head -c 300 kv.json; echo
