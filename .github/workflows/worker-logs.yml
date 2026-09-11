@@ -105,30 +105,18 @@ jobs:
           echo "=== subscripciones ==="
           curl -s -H "$AUTH" "https://api.cloudflare.com/client/v4/accounts/$ACC/subscriptions" | head -c 600; echo
 
-          echo "=== operaciones KV por dia y tipo (ultimos 45 dias) ==="
-          cat > /tmp/q.json <<JSON
-          {"query":"{ viewer { accounts(filter: {accountTag: \"$ACC\"}) { kvOperationsAdaptiveGroups(filter: {date_geq: \"2026-07-28\", date_leq: \"2026-09-11\"}, limit: 2000, orderBy: [date_ASC]) { sum { requests } dimensions { date actionType } } } } }"}
-JSON
-          curl -s -X POST "$GQL" -H "$AUTH" -H 'content-type: application/json' --data @/tmp/q.json > /tmp/kv.json
-          head -c 300 /tmp/kv.json; echo
-          echo "--- writes por dia ---"
-          python3 - <<'PY'
-          import json
-          try:
-              d=json.load(open('/tmp/kv.json'))
-              accs=d.get('data',{}).get('viewer',{}).get('accounts',[])
-              if not accs:
-                  print('sin datos; errors=', json.dumps(d.get('errors'))[:400]); raise SystemExit
-              rows=accs[0].get('kvOperationsAdaptiveGroups',[])
-              agg={}
-              for r in rows:
-                  dim=r['dimensions']; agg.setdefault(dim['date'],{})[dim['actionType']]=r['sum']['requests']
-              for day in sorted(agg):
-                  w=agg[day].get('write',0)+agg[day].get('delete',0)
-                  print(f"{day}  write={agg[day].get('write',0):>6}  delete={agg[day].get('delete',0):>5}  read={agg[day].get('read',0):>7}  list={agg[day].get('list',0):>4}  -> facturable(w+d)={w}")
-          except Exception as e:
-              print('error parseando:', e)
-          PY
+          echo "=== operaciones KV por dia y tipo ==="
+          # NOTE: no heredocs in this file. An unindented terminator ends the
+          # YAML block scalar and silently breaks the whole workflow (GitHub
+          # then reports "does not have workflow_dispatch trigger"). Build the
+          # payload with printf and parse with a single-line python3 -c.
+          Q='{ viewer { accounts(filter: {accountTag: \"ACCTAG\"}) { kvOperationsAdaptiveGroups(filter: {date_geq: \"2026-07-28\", date_leq: \"2026-09-12\"}, limit: 2000, orderBy: [date_ASC]) { sum { requests } dimensions { date actionType } } } } }'
+          Q=${Q//ACCTAG/$ACC}
+          printf '{"query":"%s"}' "$Q" > payload.json
+          curl -s -X POST "$GQL" -H "$AUTH" -H 'content-type: application/json' --data @payload.json > kv.json
+          echo "--- respuesta cruda (300) ---"; head -c 300 kv.json; echo
+          echo "--- operaciones por dia ---"
+          python3 -c "import json;d=json.load(open('kv.json'));a=d.get('data',{}).get('viewer',{}).get('accounts',[]);print('ERRORS:',json.dumps(d.get('errors'))[:500]) if not a else [print('{:12} write={:>6} delete={:>6} read={:>8} list={:>5}'.format(k,v.get('write',0),v.get('delete',0),v.get('read',0),v.get('list',0))) for k,v in sorted(__import__('functools').reduce(lambda acc,r:(acc.setdefault(r['dimensions']['date'],{}).update({r['dimensions']['actionType']:r['sum']['requests']}),acc)[1],a[0].get('kvOperationsAdaptiveGroups',[]),{}).items())]"
           echo "HIST_FIN"
 
       - name: KV diagnostics
