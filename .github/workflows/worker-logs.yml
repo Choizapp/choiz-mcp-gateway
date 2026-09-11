@@ -96,13 +96,20 @@ jobs:
         run: |
           set -uo pipefail
           NS=9f2f4efa91a54ec2ae05aa28c43b27c0
-          echo "=== namespaces visibles ==="
-          npx wrangler kv namespace list 2>&1 | head -30
-          echo "=== READ: listar claves del namespace OAUTH_KV ==="
-          npx wrangler kv key list --namespace-id "$NS" 2>&1 | head -20
-          echo "=== WRITE: put de prueba ==="
-          npx wrangler kv key put --namespace-id "$NS" "diag:worker-logs" "ok" --expiration-ttl 300 2>&1 | head -20
+          # --remote is REQUIRED: wrangler v4 kv commands operate on LOCAL
+          # miniflare state by default, which always looks empty in CI.
+          echo "=== namespaces ==="
+          npx wrangler kv namespace list 2>&1 | head -20
+          echo "=== READ remoto: claves en OAUTH_KV (primeras) ==="
+          npx wrangler kv key list --remote --namespace-id "$NS" 2>&1 | head -c 1500
+          echo
+          echo "=== conteo aproximado de claves ==="
+          npx wrangler kv key list --remote --namespace-id "$NS" 2>/dev/null | grep -c '"name"' || echo "0 / error"
+          echo "=== WRITE remoto ==="
+          npx wrangler kv key put --remote --namespace-id "$NS" "diag:probe" "ok" 2>&1 | tail -5
           echo "write_exit=$?"
-          echo "=== READ BACK ==="
-          npx wrangler kv key get --namespace-id "$NS" "diag:worker-logs" 2>&1 | head -10
+          echo "=== READ BACK remoto ==="
+          npx wrangler kv key get --remote --namespace-id "$NS" "diag:probe" 2>&1 | tail -3
           echo "read_exit=$?"
+          echo "=== limpieza ==="
+          npx wrangler kv key delete --remote --namespace-id "$NS" "diag:probe" 2>&1 | tail -2
