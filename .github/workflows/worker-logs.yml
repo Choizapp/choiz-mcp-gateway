@@ -89,3 +89,20 @@ jobs:
           grep -o '"logs":\[[^]]*\]' /tmp/tail.json | grep -v '"logs":\[\]' | head -20 || echo "(ninguno)"
           echo "=== RAW (primeros 3000 chars) ==="
           head -c 3000 /tmp/tail.json || true
+
+      - name: KV diagnostics
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        run: |
+          set -uo pipefail
+          NS=9f2f4efa91a54ec2ae05aa28c43b27c0
+          echo "=== namespaces visibles ==="
+          npx wrangler kv namespace list 2>&1 | head -30
+          echo "=== READ: listar claves del namespace OAUTH_KV ==="
+          npx wrangler kv key list --namespace-id "$NS" 2>&1 | head -20
+          echo "=== WRITE: put de prueba ==="
+          npx wrangler kv key put --namespace-id "$NS" "diag:worker-logs" "ok" --expiration-ttl 300 2>&1 | head -20
+          echo "write_exit=$?"
+          echo "=== READ BACK ==="
+          npx wrangler kv key get --namespace-id "$NS" "diag:worker-logs" 2>&1 | head -10
+          echo "read_exit=$?"
