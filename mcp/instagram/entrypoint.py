@@ -13,14 +13,18 @@ FastMCP to monkey-patch):
 
   1. Instantiate ``InstagramMCPServer()`` — this registers all tools on its
      internal ``.server`` (a ``mcp.server.lowlevel.Server`` instance).
-  2. Mount that ``.server`` behind ``StreamableHTTPSessionManager`` (the same
-     transport-layer manager FastMCP uses internally).
-  3. Wrap with a Starlette app that delegates "/" to the session manager and
-     enters the manager's lifespan in ``async with``.
-  4. Serve with uvicorn on 0.0.0.0:8080.
+  2. Ask that ``.server`` for a Starlette app via ``streamable_http_app()``
+     and serve it with uvicorn on 0.0.0.0:8080.
 
-No monkey-patch is needed: we construct the session manager directly and pin
-the path/host/port in this file.
+Since mcp 2.x (required for protocol revision 2026-07-28 — see the Dockerfile)
+step 2 is a single call: the low-level Server grows a ``streamable_http_app()``
+that wires the session manager, its lifespan AND the modern per-request
+transport. Hand-rolling ``StreamableHTTPSessionManager`` the way this file used
+to only gets you the legacy transport, so the server would still answer the
+current protocol with HTTP 400.
+
+No monkey-patch is needed: we ask the server for its app and pin the
+path/host/statelessness in this file.
 
 We replicate the fork's structlog config so log output matches what the
 authors test against (the fork's main() does this before calling
@@ -29,15 +33,11 @@ InstagramMCPServer().run()).
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import logging
 import sys
 
 import structlog
 import uvicorn
-from mcp.server.streamable_http_manager import StreamableHTTPSessionManager
-from starlette.applications import Starlette
-from starlette.routing import Mount
 
 # Make /app importable so `src` is found as a package. We must NOT add
 # /app/src to sys.path — that would import instagram_mcp_server as a
@@ -79,32 +79,23 @@ async def _serve() -> None:
 
     instagram = InstagramMCPServer()  # registers tools on instagram.server
 
-    # stateless=False keeps SDK-level sessions across requests. This is NOT
-    # the supergateway --stateful flag (which trips bug #126 under claude.ai
-    # — see project_supergateway_stateful_bug126.md). The MCP SDK's session
-    # manager handles claude.ai's parallel POST + GET SSE streams correctly
-    # at the protocol layer; the supergateway bug was specific to
-    # supergateway's bridging logic, not the spec.
-    session_manager = StreamableHTTPSessionManager(
-        app=instagram.server,
-        event_store=None,
-        json_response=False,
-        stateless=False,
-    )
-
-    async def asgi_handler(scope, receive, send):  # type: ignore[no-untyped-def]
-        await session_manager.handle_request(scope, receive, send)
-
-    @contextlib.asynccontextmanager
-    async def lifespan(app):  # type: ignore[no-untyped-def]
-        async with session_manager.run():
-            yield
-
-    # Mount at "/" — the gateway strips /mcp/<slug> before forwarding, so the
-    # upstream must serve at root.
-    app = Starlette(
-        routes=[Mount("/", app=asgi_handler)],
-        lifespan=lifespan,
+    # stateless_http=True. This was stateless=False, which kept SDK-level
+    # sessions across requests; sessions only exist on the legacy
+    # (<= 2025-11-25) transport at all, and keeping them costs a manual
+    # reconnect on every redeploy — claude.ai keeps sending the Mcp-Session-Id
+    # of the replaced container, the SDK answers an unknown session with 400,
+    # the spec says 404, and claude.ai only re-initializes on 404. That wedge
+    # hit ga4/sheets on 2026-08-24; see feedback_stale_session_after_redeploy.
+    #
+    # streamable_http_path="/" because the gateway strips /mcp/<slug> before
+    # forwarding, so the upstream must serve at root. host="0.0.0.0" so the
+    # SDK's DNS-rebinding protection does not reject the
+    # "instagram_<tenant>_mcp:8080" Host header that http-proxy-middleware
+    # (changeOrigin: true) sends.
+    app = instagram.server.streamable_http_app(
+        streamable_http_path="/",
+        stateless_http=True,
+        host="0.0.0.0",
     )
 
     # Host 0.0.0.0 so docker bridge networking works; port 8080 matches the
