@@ -7,13 +7,14 @@ FastMCP instance ``mcp`` and, in its own ``main()``, simply calls
 that CLI path because:
 
   1. We need Streamable HTTP, not stdio/SSE.
-  2. FastMCP's Streamable HTTP app mounts at ``settings.streamable_http_path``
-     which defaults to "/mcp". The gateway strips the ``/mcp/<name>`` prefix
-     and forwards to the upstream at "/", so we must move the mount to "/"
-     or every call 404s (same lesson as supergateway's --streamableHttpPath).
+  2. The Streamable HTTP app mounts at "/mcp" by default. The gateway strips
+     the ``/mcp/<name>`` prefix and forwards to the upstream at "/", so we must
+     move the mount to "/" or every call 404s (same lesson as supergateway's
+     --streamableHttpPath). Since mcp 2.x that is a run() kwarg, not a Settings
+     field.
 
-So we import the ready-built ``mcp`` instance, override the mount path to
-"/", and run it with the streamable-http transport. Importing the module is
+So we import the ready-built ``mcp`` instance and run it with the
+streamable-http transport and explicit transport kwargs. Importing the module is
 enough to register all @mcp.tool decorators (the package wires them at import
 time) and the ``spreadsheet_lifespan`` context manager that performs Google
 auth from CREDENTIALS_CONFIG. No extra init call is required.
@@ -25,6 +26,7 @@ so we do not materialize a file. compose.yml passes
 """
 from __future__ import annotations
 
+import inspect as _inspect
 import logging
 import os
 import sys
@@ -41,6 +43,37 @@ from mcp.server.mcpserver import MCPServer
 # main() imports the package. mcp 2.x is not optional: protocol revision
 # 2026-07-28 is unsupported by every 1.x release, which answers it with a bare
 # HTTP 400 that claude.ai reports as "Connection closed" on every tool call.
+
+# mcp-google-sheets also calls the constructor with transport kwargs
+# (``FastMCP(..., host=...)`` at server.py:183). In 2.x those moved out of
+# __init__ and into run()/streamable_http_app(), so passing them raises
+# TypeError. Drop any kwarg the 2.x constructor does not accept — computed from
+# the signature rather than hardcoded, so a future rename does not silently
+# swallow something real. We pass the transport settings ourselves in main().
+#
+# Patched IN PLACE on the original class, never subclassed: MCPServer is a
+# Generic (``MCPServer[LifespanResultT]``) and a plain subclass loses the
+# generic parameterisation, breaking pydantic's forward-ref resolution at
+# runtime. That is the trap documented in the warehouse entrypoint.
+_ACCEPTED_KWARGS = frozenset(_inspect.signature(MCPServer.__init__).parameters)
+_orig_mcpserver_init = MCPServer.__init__
+
+
+def _lenient_init(self, *args, **kwargs):  # type: ignore[no-untyped-def]
+    dropped = [k for k in kwargs if k not in _ACCEPTED_KWARGS]
+    for key in dropped:
+        kwargs.pop(key)
+    if dropped:
+        logging.getLogger(__name__).info(
+            "dropped constructor kwargs not supported by mcp 2.x: %s "
+            "(transport settings are passed to run() instead)",
+            ", ".join(sorted(dropped)),
+        )
+    _orig_mcpserver_init(self, *args, **kwargs)
+
+
+MCPServer.__init__ = _lenient_init  # type: ignore[method-assign]
+
 _shim = _pytypes.ModuleType("mcp.server.fastmcp")
 _shim.FastMCP = MCPServer  # type: ignore[attr-defined]
 # mcp-google-sheets imports Context from the same module for its tool
