@@ -62,7 +62,11 @@ RUN pip install --no-cache-dir \
 # builds the FastMCP instance and may want CREDENTIALS_CONFIG, which does not
 # exist at build time — a check that can fail for the wrong reason is worse than
 # a narrower one.
-RUN python -c "import mcp_google_sheets; import importlib.metadata as m; print('package check OK, mcp', m.version('mcp'))"
+# NOTE: there is no import check here on purpose. mcp-google-sheets does
+# ``from mcp.server.fastmcp import FastMCP``, a module mcp 2.x removed, so
+# importing it standalone at this point fails by design. It is only importable
+# through the stand-in that entrypoint.py installs — which is exactly what the
+# check further down (after the COPY) exercises.
 
 # Flush stdout immediately so init logs land in `docker logs` without delay.
 ENV PYTHONUNBUFFERED=1
