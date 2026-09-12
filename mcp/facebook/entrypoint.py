@@ -1,55 +1,64 @@
-"""Facebook MCP entrypoint — serves FastMCP via streamable-http directly.
+"""Facebook MCP entrypoint — serves the fork's MCP server via streamable-http.
 
-Mirror of mcp/warehouse/entrypoint.py. See that file's module docstring for the
-full rationale; the short version is:
+Why this exists
+---------------
+MCP protocol revision 2026-07-28 (which claude.ai switched to on 2026-09-11)
+removed the ``initialize`` handshake and protocol-level sessions, and made
+``server/discover`` mandatory. Support landed only in the mcp 2.x SDK, which
+renamed ``FastMCP`` to ``MCPServer``; ``mcp.server.fastmcp`` now raises
+ModuleNotFoundError pointing at the migration guide.
 
-  - FastMCP (mcp 1.25.0) hard-codes ``streamable_http_path: str = "/mcp"`` and
-    ``host: str = "127.0.0.1"`` as kwarg defaults in ``__init__``. Those kwarg
-    defaults beat env vars in pydantic-settings, so we cannot configure the
-    path/host through the environment.
-  - We must NOT subclass FastMCP — it is ``Generic[LifespanResultT]`` and a
-    plain subclass breaks generic parameterisation, crashing forward-ref
-    resolution at runtime (validated and reverted in PR #8).
-  - Therefore we monkey-patch ``FastMCP.__init__`` in place before importing
-    the user's ``server.py``.
+The fork's ``server.py`` still does ``from mcp.server.fastmcp import FastMCP``
+and ``mcp = FastMCP("FacebookMCP")``, registering tools with ``@mcp.tool()``;
+it never calls ``mcp.run()``. So we register a stand-in module under that name
+BEFORE importing it, exporting ``FastMCP = MCPServer``, and drive the transport
+ourselves.
 
-The fork's server.py only does ``mcp = FastMCP("FacebookMCP")`` and registers
-tools with @mcp.tool(); it never calls ``mcp.run()``. The previous image
-launched it through ``supergateway --stdio "mcp run /app/server.py"``, which
-caused a child-process leak under load (supergateway --stateless spawns a
-Python child per request and never reaps them). We now import the FastMCP
-instance directly and run it via streamable-http.
+This replaces the old ``FastMCP.__init__`` monkey-patch: in 2.x the transport
+settings (host / port / path / statelessness) moved OUT of the constructor and
+INTO explicit keyword arguments on ``run()``, so there is nothing left to patch
+into __init__ — we just pass them below.
+
+Drop the shim when the fork imports ``MCPServer`` natively.
 """
+
 from __future__ import annotations
 
 import sys
+import types as _pytypes
 
-import mcp.server.fastmcp as _fastmcp_pkg
+from mcp.server.mcpserver import MCPServer
 
-_orig_init = _fastmcp_pkg.FastMCP.__init__
-
-
-def _patched_init(self, *args, **kwargs):  # type: ignore[no-untyped-def]
-    # Path "/" so the gateway (which strips /mcp/<slug>) reaches the server
-    # without a 307 redirect.
-    kwargs.setdefault("streamable_http_path", "/")
-    # Host 0.0.0.0 disables FastMCP's auto DNS-rebinding protection, which
-    # otherwise rejects the "facebook_<tenant>_mcp:8080" Host header that
-    # http-proxy-middleware (changeOrigin: true) sends → HTTP 421.
-    kwargs.setdefault("host", "0.0.0.0")
-    # Listen on 8080 to match the gateway's UPSTREAM_FACEBOOK_* URLs.
-    kwargs.setdefault("port", 8080)
-    _orig_init(self, *args, **kwargs)
-
-
-_fastmcp_pkg.FastMCP.__init__ = _patched_init  # type: ignore[method-assign]
+# Stand-in for the module mcp 2.x removed. Must be registered BEFORE the fork
+# is imported: its module body resolves the old name at load time.
+_shim = _pytypes.ModuleType("mcp.server.fastmcp")
+_shim.FastMCP = MCPServer  # type: ignore[attr-defined]
+sys.modules["mcp.server.fastmcp"] = _shim
 
 # /app holds the cloned fork; make it importable regardless of CWD.
 sys.path.insert(0, "/app")
 
-# Import for side effect: builds the FastMCP instance and registers tools.
+# Import for side effect: builds the server instance and registers tools.
 from server import mcp  # noqa: E402
 
 
 if __name__ == "__main__":
-    mcp.run(transport="streamable-http")
+    mcp.run(
+        transport="streamable-http",
+        # Path "/" so the gateway (which strips /mcp/<slug>) reaches the server
+        # without a 307 redirect to an internal Docker hostname.
+        streamable_http_path="/",
+        # Host 0.0.0.0 disables the SDK's auto DNS-rebinding protection, which
+        # otherwise rejects the "facebook_<tenant>_mcp:8080" Host header that
+        # http-proxy-middleware (changeOrigin: true) sends -> HTTP 421.
+        host="0.0.0.0",
+        # Listen on 8080 to match the gateway's UPSTREAM_FACEBOOK_* URLs.
+        port=8080,
+        # Sessions only exist on the legacy (<= 2025-11-25) transport that older
+        # clients still use. Keeping it stateless sidesteps the stale
+        # Mcp-Session-Id-after-redeploy wedge that bit ga4/sheets on 2026-08-24
+        # (feedback_stale_session_after_redeploy): the SDK answers an unknown
+        # session with 400, the spec says 404, and claude.ai only re-initializes
+        # on 404. This image was previously stateful and had the same exposure.
+        stateless_http=True,
+    )
