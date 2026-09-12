@@ -59,13 +59,23 @@ RUN git clone https://github.com/Choizapp/choiz-instagram-mcp.git . \
 # 1.25.0 (matches warehouse + facebook) for reproducible behaviour of
 # StreamableHTTPSessionManager. starlette + uvicorn are needed by our
 # entrypoint to host the MCP session manager as an ASGI app.
+# mcp 2.x is REQUIRED: protocol revision 2026-07-28 removed the initialize
+# handshake and added the mandatory server/discover RPC. Every 1.x release tops
+# out at 2025-11-25 and answers it with a bare HTTP 400, which claude.ai reports
+# as "Connection closed" on every tool call. Pinned EXACTLY.
 RUN pip install --no-cache-dir -r requirements.txt \
- && pip install --no-cache-dir 'mcp==1.25.0' 'uvicorn[standard]' starlette
+ && pip install --no-cache-dir 'mcp==2.2.0' 'uvicorn[standard]' starlette
 
 # Flush stdout immediately so init logs land in `docker logs` without delay.
 ENV PYTHONUNBUFFERED=1
 
 COPY entrypoint.py /opt/entrypoint.py
+
+# Fail the BUILD, not production, if the SDK layout moves again. Asserts the
+# protocol revision and the exact method + kwargs entrypoint.py calls on the
+# low-level Server.
+RUN python -c "import inspect, importlib.metadata as m; from mcp.server.lowlevel import Server; from mcp_types.version import KNOWN_PROTOCOL_VERSIONS as K; assert '2026-07-28' in K, K; p = inspect.signature(Server.streamable_http_app).parameters; assert all(k in p for k in ('streamable_http_path','stateless_http','host')), sorted(p); print('import check OK, mcp', m.version('mcp'), K)"
+
 
 EXPOSE 8080
 
