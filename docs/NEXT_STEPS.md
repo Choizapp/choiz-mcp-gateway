@@ -94,6 +94,69 @@ Ademas el deploy pasa a `docker compose up -d --remove-orphans`: sin eso, un
 servicio borrado del compose se queda corriendo como huerfano en el EC2 y la
 baja es solo de mentira.
 
+## Migracion al protocolo MCP 2026-07-28 - estado 2026-09-12
+
+claude.ai adopto la revision 2026-07-28 el 2026-09-11. Elimina el handshake
+`initialize`, elimina las sesiones de protocolo y el header `Mcp-Session-Id`,
+hace obligatorio el RPC `server/discover` y mueve la version de protocolo a un
+envelope `params._meta`. Ningun release 1.x del SDK la habla: responden HTTP
+400 pelado, que el cliente reporta como "Connection closed" en cada tool call.
+
+### Patron de fondo
+
+Los MCPs que sobrevivieron los tres incidentes (este, el rebuild del
+2026-08-24 y el de cuota de KV) son los que escribimos nosotros. Los que
+rompieron son wrappers de terceros que se auto-pinean a SDKs viejos: Google
+capeo `mcp<2` el 2026-07-28, postgres-mcp el 2026-08-16. Cada dependencia de
+terceros sin migrar es un outage futuro.
+
+### Migrados (verificados contra credenciales reales, no solo build)
+
+| MCP | Como |
+|---|---|
+| warehouse | shim de `mcp.server.fastmcp` sobre postgres-mcp |
+| powerbi x2, dhl, tiktok-organic, viral-loops, gmail x2 | FastMCP -> MCPServer, transporte a kwargs de `run()` |
+| facebook x2, sheets | shim del modulo removido; sheets ademas filtra kwargs del constructor y usa `remove_tool()` publico |
+| google-ads | bump a `fastmcp` 4.0.3, la primera standalone sobre mcp 2.x |
+| instagram x2 | fork propio migrado en Choizapp/choiz-instagram-mcp#2 |
+| ga4 x2 | fork nuevo Choizapp/choiz-google-analytics-mcp (upstream se capeo en `mcp<2`) |
+
+Dos patrones utiles que aparecieron:
+
+- Los `Server` de bajo nivel ya no necesitan armar `StreamableHTTPSessionManager`
+  a mano: `Server.streamable_http_app()` cablea el session manager, su lifespan
+  Y el transporte moderno por request. El armado manual solo da el legacy, asi
+  que el server responde 400 al protocolo actual aun con el SDK nuevo.
+- Los decoradores (`@server.list_tools()` etc.) se reemplazan por los callbacks
+  `on_*` del constructor, que es API de primera clase en 2.x. Un adaptador fino
+  traduce (ctx, params tipados) -> Result tipado sin tocar los handlers.
+
+### Retirados por cero uso (medido en 30 dias de logs)
+
+meta-ads, shopify x2. Ver la seccion de bajas mas arriba.
+
+### PENDIENTE: gsc x2
+
+Unico que queda sin migrar. **Cero tool calls en 30 dias**, pero tiene un
+consumidor real: la skill `blog-analyst` usa `enhanced_search_analytics` y
+`detect_quick_wins`.
+
+Es Node, y ahi el problema es distinto: `@modelcontextprotocol/sdk` 1.30.0
+tambien topea en 2025-11-25. El protocolo nuevo vive en paquetes nuevos
+(`@modelcontextprotocol/server@2.0.0`), asi que no es un bump sino migrar el
+fork de `ahonn/mcp-server-gsc` a una API distinta.
+
+Dos caminos, a decidir:
+
+1. Forkear `ahonn/mcp-server-gsc` y migrarlo a `@modelcontextprotocol/server@2.x`,
+   igual que se hizo con instagram y ga4 en Python.
+2. Reescribirlo first-party en Python sobre `MCPServer` y la Search Console API.
+   Son 8 tools, dos de ellas con logica analitica propia
+   (`enhanced_search_analytics`, `detect_quick_wins`) que habria que replicar.
+
+Si al revisar el uso sigue en cero cuando alguien lo necesite, la tercera
+opcion es retirarlo como meta-ads y shopify.
+
 ## Not started / next up
 
 Ordered by impact vs. effort.
