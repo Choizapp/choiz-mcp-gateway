@@ -32,8 +32,7 @@ import os
 import sys
 import types as _pytypes
 
-from mcp.server.context import Context as _Context
-from mcp.server.mcpserver import MCPServer
+from mcp.server.mcpserver import Context as _Context, MCPServer
 
 # Stand-in for the module mcp 2.x removed. mcp-google-sheets still does
 # ``from mcp.server.fastmcp import FastMCP``; 2.x renamed that class to
@@ -77,9 +76,11 @@ MCPServer.__init__ = _lenient_init  # type: ignore[method-assign]
 _shim = _pytypes.ModuleType("mcp.server.fastmcp")
 _shim.FastMCP = MCPServer  # type: ignore[attr-defined]
 # mcp-google-sheets imports Context from the same module for its tool
-# signatures. 2.x moved it to mcp.server.context (it is also re-exported from
-# mcp.server.mcpserver); re-export it here so the package's `from
-# mcp.server.fastmcp import FastMCP, Context` resolves in one go.
+# signatures. Take it from mcp.server.mcpserver, NOT mcp.server.context: the
+# tool decorator special-cases the Context parameter so it never reaches the
+# input schema, and it only recognises the class exported alongside MCPServer.
+# Using the mcp.server.context one makes pydantic try to build a JSON schema
+# for it and blow up with PydanticInvalidForJsonSchema at import time.
 _shim.Context = _Context  # type: ignore[attr-defined]
 sys.modules["mcp.server.fastmcp"] = _shim
 
