@@ -30,6 +30,7 @@ import os
 import sys
 import types as _pytypes
 
+from mcp.server.context import Context as _Context
 from mcp.server.mcpserver import MCPServer
 
 # Stand-in for the module mcp 2.x removed. mcp-google-sheets still does
@@ -42,6 +43,11 @@ from mcp.server.mcpserver import MCPServer
 # HTTP 400 that claude.ai reports as "Connection closed" on every tool call.
 _shim = _pytypes.ModuleType("mcp.server.fastmcp")
 _shim.FastMCP = MCPServer  # type: ignore[attr-defined]
+# mcp-google-sheets imports Context from the same module for its tool
+# signatures. 2.x moved it to mcp.server.context (it is also re-exported from
+# mcp.server.mcpserver); re-export it here so the package's `from
+# mcp.server.fastmcp import FastMCP, Context` resolves in one go.
+_shim.Context = _Context  # type: ignore[attr-defined]
 sys.modules["mcp.server.fastmcp"] = _shim
 
 
