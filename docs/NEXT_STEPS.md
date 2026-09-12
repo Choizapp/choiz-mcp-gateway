@@ -70,6 +70,30 @@ and the legacy stateless path still answers `tools/list` without a session.
 - `list_schemas` on warehouse returns ~400 `pg_temp_*` / `pg_toast_temp_*` system schemas.
   Filter them; it is a large useless payload on every call.
 
+## Bajas 2026-09-12 - meta-ads y shopify retirados
+
+Medido en los logs de los contenedores: **cero tool calls en 30 dias** para
+`meta_ads_mcp`, `shopify_choiz_mcp` y `shopify_timeless_mcp`. Retirados en
+lugar de migrarlos al protocolo 2026-07-28.
+
+- **meta-ads** — completa el plan de deprecacion arrancado el 2026-05-21
+  (memoria `project_meta_ads_deprecation_plan`), cuyos pasos 2 y 3 estaban
+  vencidos desde junio/julio. Meta publica su MCP oficial en
+  `mcp.facebook.com/ads`, ya verificado para la cuenta de Choiz, asi que
+  dejamos de mantener el fork `Choizapp/choiz-meta-ads-mcp`.
+- **shopify** — los datos de ventas de ambas tiendas ya viven en el warehouse
+  (schemas `a` / `a_t`), que es por donde realmente se consultan. El MCP
+  envolvia `GeLi2001/shopify-mcp`, un proyecto de terceros, y migrarlo exigia
+  pasar el fork al SDK de TypeScript 2.x.
+
+Se elimino de `compose.yml`, del routing en `gateway/src/index.ts`, de los jobs
+de `deploy-gateway.yml`, y los directorios `mcp/meta-ads/` + `mcp/shopify/`.
+Las imagenes siguen en GHCR si hiciera falta volver atras.
+
+Ademas el deploy pasa a `docker compose up -d --remove-orphans`: sin eso, un
+servicio borrado del compose se queda corriendo como huerfano en el EC2 y la
+baja es solo de mentira.
+
 ## Not started / next up
 
 Ordered by impact vs. effort.
