@@ -1,7 +1,7 @@
 name: Build and deploy gateway stack
 
 # Triggers when anything that goes into a container image (gateway, warehouse,
-# meta-ads) or the compose file changes. Each image is built only if its own
+# facebook) or the compose file changes. Each image is built only if its own
 # context changed; the deploy step runs once at the end.
 #
 # Required GitHub secrets:
@@ -45,13 +45,11 @@ jobs:
     outputs:
       gateway: ${{ steps.filter.outputs.gateway }}
       warehouse: ${{ steps.filter.outputs.warehouse }}
-      meta_ads: ${{ steps.filter.outputs.meta_ads }}
       facebook: ${{ steps.filter.outputs.facebook }}
       instagram: ${{ steps.filter.outputs.instagram }}
       google_ads: ${{ steps.filter.outputs.google_ads }}
       ga4: ${{ steps.filter.outputs.ga4 }}
       gsc: ${{ steps.filter.outputs.gsc }}
-      shopify: ${{ steps.filter.outputs.shopify }}
       powerbi: ${{ steps.filter.outputs.powerbi }}
       tiktok_organic: ${{ steps.filter.outputs.tiktok_organic }}
       dhl: ${{ steps.filter.outputs.dhl }}
@@ -69,8 +67,6 @@ jobs:
               - 'gateway/**'
             warehouse:
               - 'mcp/warehouse/**'
-            meta_ads:
-              - 'mcp/meta-ads/**'
             facebook:
               - 'mcp/facebook/**'
             instagram:
@@ -81,8 +77,6 @@ jobs:
               - 'mcp/ga4/**'
             gsc:
               - 'mcp/gsc/**'
-            shopify:
-              - 'mcp/shopify/**'
             powerbi:
               - 'mcp/powerbi/**'
             tiktok_organic:
@@ -153,33 +147,6 @@ jobs:
             ${{ env.IMAGE_PREFIX }}/warehouse:${{ github.sha }}
           cache-from: type=gha,scope=warehouse
           cache-to: type=gha,mode=max,scope=warehouse
-
-  build-meta-ads:
-    name: Build meta-ads image
-    needs: changes
-    if: needs.changes.outputs.meta_ads == 'true' || needs.changes.outputs.compose == 'true' || github.event_name == 'workflow_dispatch'
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: docker/setup-qemu-action@v3
-      - uses: docker/setup-buildx-action@v3
-      - name: Log in to GHCR
-        uses: docker/login-action@v3
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-      - name: Build and push
-        uses: docker/build-push-action@v6
-        with:
-          context: ./mcp/meta-ads
-          push: true
-          platforms: linux/arm64
-          tags: |
-            ${{ env.IMAGE_PREFIX }}/meta-ads:latest
-            ${{ env.IMAGE_PREFIX }}/meta-ads:${{ github.sha }}
-          cache-from: type=gha,scope=meta-ads
-          cache-to: type=gha,mode=max,scope=meta-ads
 
   build-facebook:
     name: Build facebook image
@@ -315,33 +282,6 @@ jobs:
             ${{ env.IMAGE_PREFIX }}/gsc:${{ github.sha }}
           cache-from: type=gha,scope=gsc
           cache-to: type=gha,mode=max,scope=gsc
-
-  build-shopify:
-    name: Build shopify image
-    needs: changes
-    if: needs.changes.outputs.shopify == 'true' || needs.changes.outputs.compose == 'true' || github.event_name == 'workflow_dispatch'
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: docker/setup-qemu-action@v3
-      - uses: docker/setup-buildx-action@v3
-      - name: Log in to GHCR
-        uses: docker/login-action@v3
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-      - name: Build and push
-        uses: docker/build-push-action@v6
-        with:
-          context: ./mcp/shopify
-          push: true
-          platforms: linux/arm64
-          tags: |
-            ${{ env.IMAGE_PREFIX }}/shopify:latest
-            ${{ env.IMAGE_PREFIX }}/shopify:${{ github.sha }}
-          cache-from: type=gha,scope=shopify
-          cache-to: type=gha,mode=max,scope=shopify
 
   build-powerbi:
     name: Build powerbi image
@@ -507,11 +447,11 @@ jobs:
 
   deploy:
     name: Deploy on EC2 via SSM
-    needs: [build-gateway, build-warehouse, build-meta-ads, build-facebook, build-instagram, build-google-ads, build-ga4, build-gsc, build-shopify, build-powerbi, build-tiktok-organic, build-dhl, build-sheets, build-viral-loops, build-gmail]
+    needs: [build-gateway, build-warehouse, build-facebook, build-instagram, build-google-ads, build-ga4, build-gsc, build-powerbi, build-tiktok-organic, build-dhl, build-sheets, build-viral-loops, build-gmail]
     # Run only if at least one build succeeded. If all builds were skipped
     # (because nothing relevant changed, e.g. workflow-only edit), do not
     # touch the EC2 — there's nothing to deploy.
-    if: ${{ !cancelled() && !failure() && (needs.build-gateway.result == 'success' || needs.build-warehouse.result == 'success' || needs.build-meta-ads.result == 'success' || needs.build-facebook.result == 'success' || needs.build-instagram.result == 'success' || needs.build-google-ads.result == 'success' || needs.build-ga4.result == 'success' || needs.build-gsc.result == 'success' || needs.build-shopify.result == 'success' || needs.build-powerbi.result == 'success' || needs.build-tiktok-organic.result == 'success' || needs.build-dhl.result == 'success' || needs.build-sheets.result == 'success' || needs.build-viral-loops.result == 'success' || needs.build-gmail.result == 'success') }}
+    if: ${{ !cancelled() && !failure() && (needs.build-gateway.result == 'success' || needs.build-warehouse.result == 'success' || needs.build-facebook.result == 'success' || needs.build-instagram.result == 'success' || needs.build-google-ads.result == 'success' || needs.build-ga4.result == 'success' || needs.build-gsc.result == 'success' || needs.build-powerbi.result == 'success' || needs.build-tiktok-organic.result == 'success' || needs.build-dhl.result == 'success' || needs.build-sheets.result == 'success' || needs.build-viral-loops.result == 'success' || needs.build-gmail.result == 'success') }}
     runs-on: ubuntu-latest
     steps:
       - name: Configure AWS credentials
@@ -536,7 +476,7 @@ jobs:
             --instance-ids "$INSTANCE_ID" \
             --document-name "AWS-RunShellScript" \
             --comment "Deploy gateway from ${GIT_SHA:0:7}" \
-            --parameters "commands=[\"set -eu\",\"mkdir -p ${REPO_PATH}\",\"echo ${COMPOSE_B64} | base64 -d > ${REPO_PATH}/compose.yml\",\"cd ${REPO_PATH}\",\"docker compose pull\",\"docker compose up -d\",\"docker image prune -f\",\"docker compose ps\"]" \
+            --parameters "commands=[\"set -eu\",\"mkdir -p ${REPO_PATH}\",\"echo ${COMPOSE_B64} | base64 -d > ${REPO_PATH}/compose.yml\",\"cd ${REPO_PATH}\",\"docker compose pull\",\"docker compose up -d --remove-orphans\",\"docker image prune -f\",\"docker compose ps\"]" \
             --query 'Command.CommandId' --output text)
           echo "command_id=$CMD_ID" >> "$GITHUB_OUTPUT"
           echo "Sent SSM command $CMD_ID"

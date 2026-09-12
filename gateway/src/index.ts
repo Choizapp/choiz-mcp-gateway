@@ -10,7 +10,6 @@ const app = express();
 // Add a new entry here when you add a new MCP container to compose.yml.
 const upstreams: Record<string, string | undefined> = {
   "/mcp/warehouse":         process.env.UPSTREAM_WAREHOUSE,
-  "/mcp/meta-ads":          process.env.UPSTREAM_META_ADS,
   "/mcp/facebook-choiz":    process.env.UPSTREAM_FACEBOOK_CHOIZ,
   "/mcp/facebook-timeless": process.env.UPSTREAM_FACEBOOK_TIMELESS,
   "/mcp/instagram-choiz":    process.env.UPSTREAM_INSTAGRAM_CHOIZ,
@@ -19,15 +18,13 @@ const upstreams: Record<string, string | undefined> = {
   "/mcp/ga4-timeless":       process.env.UPSTREAM_GA4_TIMELESS,
   "/mcp/gsc-choiz":          process.env.UPSTREAM_GSC_CHOIZ,
   "/mcp/gsc-timeless":       process.env.UPSTREAM_GSC_TIMELESS,
-  "/mcp/shopify-choiz":      process.env.UPSTREAM_SHOPIFY_CHOIZ,
-  "/mcp/shopify-timeless":   process.env.UPSTREAM_SHOPIFY_TIMELESS,
   // google-ads re-enabled 2026-05-07 with official googleads/google-ads-mcp
   // (PR #15). The original 2026-04-28 disable was due to supergateway
   // --stateless gRPC respawn-storms; the official MCP runs in-process under
   // FastMCP so the storm pattern is structurally gone.
   "/mcp/google-ads":         process.env.UPSTREAM_GOOGLE_ADS,
-  // Power BI MCP — per-brand slug, matches ga4 / gsc / facebook / instagram /
-  // shopify multi-tenant pattern. One container per brand pinned to a single
+  // Power BI MCP — per-brand slug, matches ga4 / gsc / facebook / instagram
+  // multi-tenant pattern. One container per brand pinned to a single
   // dataset; tools have no `dataset` argument because the route IS the brand.
   // The previous single `/mcp/powerbi` route was retired on 2026-05-19.
   "/mcp/powerbi-choiz":      process.env.UPSTREAM_POWERBI_CHOIZ,
