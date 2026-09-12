@@ -36,7 +36,7 @@ from typing import Any
 
 import msal
 import requests
-from mcp.server.fastmcp import FastMCP
+from mcp.server.mcpserver import MCPServer
 
 logger = logging.getLogger("powerbi_mcp")
 logging.basicConfig(
@@ -123,27 +123,26 @@ def _execute_query(dax: str) -> list[dict[str, Any]]:
 
 # --- MCP server -----------------------------------------------------------
 
+# mcp 2.x renamed FastMCP to MCPServer and moved the transport settings OUT of
+# the constructor and INTO explicit keyword arguments on run()/​
+# run_streamable_http_async(). They are passed at the bottom of this file; the
+# reasons each one is needed are unchanged:
+#
 # host="0.0.0.0" so the gateway can reach us across the docker bridge with
 #   Host: powerbi_*_mcp:8080 (changeOrigin: true in http-proxy-middleware).
-#   FastMCP otherwise auto-enables DNS rebinding protection that rejects
+#   The SDK otherwise auto-enables DNS rebinding protection that rejects
 #   non-localhost Host headers — same gotcha as warehouse.
 # streamable_http_path="/" so the gateway can strip /mcp/powerbi-<brand>
-#   and forward to "/". FastMCP's default is "/mcp" which would force the
+#   and forward to "/". The SDK default is "/mcp", which would force the
 #   gateway to forward /mcp instead of /, leaking the internal path into
 #   errors.
-# stateless_http=True so every request creates an ephemeral session. This
-#   sidesteps the post-redeploy "stale Mcp-Session-Id" failure mode
-#   (feedback_stale_session_after_redeploy): the MCP Python SDK returns 400
-#   on unknown session-id when the spec says 404, and claude.ai only
-#   re-initializes on 404. With stateless=True, there is no per-session
-#   state to invalidate — every redeploy is harmless to in-flight chats.
-mcp = FastMCP(
-    name=f"powerbi-{BRAND}",
-    host="0.0.0.0",
-    port=8080,
-    streamable_http_path="/",
-    stateless_http=True,
-)
+# stateless_http=True so every request creates an ephemeral session. Sessions
+#   only exist on the legacy (<= 2025-11-25) transport that older clients
+#   still use; keeping it stateless sidesteps the post-redeploy "stale
+#   Mcp-Session-Id" failure mode (feedback_stale_session_after_redeploy),
+#   where the SDK answers an unknown session-id with 400 while the spec says
+#   404 and claude.ai only re-initializes on 404.
+mcp = MCPServer(name=f"powerbi-{BRAND}")
 
 
 @mcp.tool()
@@ -295,7 +294,13 @@ def main() -> None:
         # Don't exit: token mint may fail transiently at boot but recover. We
         # log loudly and let mcp.run() proceed; first user request will retry.
 
-    mcp.run(transport="streamable-http")
+    mcp.run(
+        transport="streamable-http",
+        host="0.0.0.0",
+        port=8080,
+        streamable_http_path="/",
+        stateless_http=True,
+    )
 
 
 if __name__ == "__main__":

@@ -72,7 +72,7 @@ import uuid
 from typing import Any
 
 import requests
-from mcp.server.fastmcp import FastMCP
+from mcp.server.mcpserver import MCPServer
 from starlette.requests import Request
 from starlette.responses import Response
 
@@ -289,16 +289,15 @@ def _externalize_documents(data: dict[str, Any]) -> dict[str, Any]:
 
 # --- MCP server -----------------------------------------------------------
 
-# host="0.0.0.0" so the gateway reaches us across the docker bridge.
-# streamable_http_path="/" so the gateway can strip /mcp/dhl and forward to "/".
-# stateless_http=True: ephemeral sessions, sidesteps stale-session-after-redeploy.
-mcp = FastMCP(
-    name="dhl",
-    host="0.0.0.0",
-    port=8080,
-    streamable_http_path="/",
-    stateless_http=True,
-)
+# mcp 2.x renamed FastMCP to MCPServer and moved the transport settings OUT of
+# the constructor and INTO explicit keyword arguments on run(). They are passed
+# at the bottom of this file; the reason each one is needed is unchanged:
+# host="0.0.0.0" (the gateway reaches us with Host: <service>:8080 and the SDK
+# otherwise rejects non-localhost Host headers), streamable_http_path="/" (the
+# gateway strips the /mcp/<slug> prefix and forwards to "/"), and
+# stateless_http=True (sessions only exist on the legacy transport; keeping it
+# stateless sidesteps the stale-Mcp-Session-Id-after-redeploy wedge).
+mcp = MCPServer(name="dhl")
 
 
 @mcp.custom_route("/download/{token}", methods=["GET"])
@@ -613,7 +612,13 @@ def main() -> None:
             "DHL_BASE_URL points at PRODUCTION — create_shipment / "
             "create_return_shipment will book real shipments and may incur charges."
         )
-    mcp.run(transport="streamable-http")
+    mcp.run(
+        transport="streamable-http",
+        host="0.0.0.0",
+        port=8080,
+        streamable_http_path="/",
+        stateless_http=True,
+    )
 
 
 if __name__ == "__main__":
