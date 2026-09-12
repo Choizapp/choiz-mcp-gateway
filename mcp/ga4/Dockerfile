@@ -27,7 +27,20 @@
 
 FROM python:3.12-slim
 
-ARG GA4_MCP_SHA=6fd3bf88e2591855cf3fade7e3c791e1f6bda72d
+# Choiz fork of googleanalytics/google-analytics-mcp, branched at the 6fd3bf88
+# we already ran. Upstream capped itself at `mcp<2` on 2026-07-28 (commit
+# 64ace00b) and has not migrated, so protocol revision 2026-07-28 — which
+# claude.ai switched to on 2026-09-11 — is unreachable from it. The fork carries
+# exactly two changes, both at the SDK boundary: Tool.inputSchema ->
+# input_schema, and the removed @app.list_tools()/@app.call_tool() decorators
+# replaced by the on_* constructor callbacks 2.x takes. See
+# Choizapp/choiz-google-analytics-mcp. Point back at Google and delete the fork
+# the day upstream ships 2.x support.
+#
+# The pin is the commit on the fork's `feat/mcp-2x` branch, not its `main`:
+# `main` tracks Google's upstream verbatim, so pinning it would silently pull
+# the unmigrated code back in. Do not delete that branch.
+ARG GA4_MCP_SHA=0636b18af5179e24d98cc8b4d60e4c9bc4906cc3
 
 # git: pip install from a git URL needs git in the image at install time.
 # ca-certificates: HTTPS to analyticsdata.googleapis.com + GitHub.
@@ -48,22 +61,26 @@ RUN apt-get update \
 # `Tool.input_schema`, so the pinned analytics_mcp died at import with
 # AttributeError and both ga4 containers sat in a restart loop.
 #
-# 1.25.0, NOT the 1.29.0 that google-ads runs. Upstream declares only
-# `mcp>=1.24.0`, 1.25.0 satisfies it, and 1.25.0 is the version every other
-# SDK-based image here runs. google-ads can stay on 1.29.0 because it uses the
+# 2.2.0 since 2026-09-11. mcp 2.x is REQUIRED, not a version bump: protocol
+# revision 2026-07-28 removed the initialize handshake and added the mandatory
+# server/discover RPC, and every 1.x release tops out at 2025-11-25 and answers
+# the new revision with a bare HTTP 400 — which claude.ai reports as
+# "Connection closed" on every tool call. Upstream declares only `mcp>=1.24.0`,
+# so 2.x satisfies it. google-ads is unaffected by this pin because it uses the
 # STANDALONE fastmcp package rather than the SDK's — see
 # memory feedback_two_fastmcp_packages.
 RUN pip install --no-cache-dir \
-    "git+https://github.com/googleanalytics/google-analytics-mcp.git@${GA4_MCP_SHA}" \
-    "mcp==1.25.0" \
+    "git+https://github.com/Choizapp/choiz-google-analytics-mcp.git@${GA4_MCP_SHA}" \
+    "mcp==2.2.0" \
     "uvicorn[standard]" \
     starlette
 
-# Fail the BUILD, not production, if the SDK layout moves again. This is the
-# exact import entrypoint.py depends on, plus the upstream package itself.
-# `analytics_mcp.server` (not just the top package) on purpose: importing it is
-# what registers the tools and evaluates the `tool.inputSchema` line that broke.
-RUN python -c "import mcp.server.streamable_http_manager, analytics_mcp.server; import importlib.metadata as m; print('import check OK, mcp', m.version('mcp'))"
+# Fail the BUILD, not production, if the SDK layout moves again. Asserts the
+# protocol revision, the exact method + kwargs entrypoint.py now calls on the
+# low-level Server, and imports `analytics_mcp.server` (not just the top
+# package) on purpose: importing it is what registers the tools and evaluates
+# the `tool.inputSchema` line that broke once.
+RUN python -c "import inspect, importlib.metadata as m; from mcp.server.lowlevel import Server; from mcp_types.version import KNOWN_PROTOCOL_VERSIONS as K; assert '2026-07-28' in K, K; p = inspect.signature(Server.streamable_http_app).parameters; assert all(k in p for k in ('streamable_http_path','stateless_http','host')), sorted(p); import analytics_mcp.server; print('import check OK, mcp', m.version('mcp'), K)"
 
 # Strip build deps once wheels are compiled to keep the final layer slim.
 RUN apt-get purge -y --auto-remove build-essential && rm -rf /var/lib/apt/lists/*

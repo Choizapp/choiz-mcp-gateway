@@ -17,9 +17,15 @@ fork — so the migration shape is the same:
   2. Import ``analytics_mcp.server`` to register all @app.tool decorators
      (run_report, run_funnel_report, get_account_summaries, etc.) on the
      module-level lowlevel Server at ``analytics_mcp.coordinator.app``.
-  3. Mount that Server behind ``StreamableHTTPSessionManager``.
-  4. Wrap as a Starlette app at "/" with the manager's lifespan.
-  5. Serve under uvicorn on 0.0.0.0:8080.
+  3. Ask that Server for a Starlette app via ``streamable_http_app()`` and
+     serve it under uvicorn on 0.0.0.0:8080.
+
+Since mcp 2.x (required for protocol revision 2026-07-28 — see the Dockerfile)
+step 3 is a single call: the low-level Server grows a ``streamable_http_app()``
+that wires the session manager, its lifespan AND the modern per-request
+transport. Hand-rolling StreamableHTTPSessionManager the way this file used to
+only gets you the legacy transport, so the server would still answer the
+current protocol with HTTP 400.
 
 property_id is now a per-tool argument, not a per-container env. Two
 containers still exist (ga4_choiz_mcp + ga4_timeless_mcp) for slug
@@ -31,15 +37,11 @@ from __future__ import annotations
 
 import asyncio
 import base64
-import contextlib
 import logging
 import os
 import sys
 
 import uvicorn
-from mcp.server.streamable_http_manager import StreamableHTTPSessionManager
-from starlette.applications import Starlette
-from starlette.routing import Mount
 
 
 def _materialize_service_account() -> None:
@@ -77,7 +79,7 @@ async def _serve() -> None:
     import analytics_mcp.server  # noqa: F401
     from analytics_mcp.coordinator import app
 
-    # stateless=True: every request is its own ephemeral session.
+    # stateless_http=True: every request is its own ephemeral session.
     #
     # This was stateless=False, and 2026-08-24 showed the cost. After the
     # container was replaced by a redeploy, claude.ai kept sending the
@@ -85,28 +87,17 @@ async def _serve() -> None:
     # answers an unknown session with 400, the MCP spec says 404, and claude.ai
     # only re-initializes on 404. Net effect: the connector is wedged until a
     # human reconnects it by hand — on every single redeploy. See memory
-    # feedback_stale_session_after_redeploy.
+    # feedback_stale_session_after_redeploy. Sessions only exist on the legacy
+    # (<= 2025-11-25) transport at all, so this now only affects older clients.
     #
-    # With no session state there is nothing to go stale, which is why dhl /
-    # powerbi / gmail / tiktok-organic / viral-loops never hit this.
-    session_manager = StreamableHTTPSessionManager(
-        app=app,
-        event_store=None,
-        json_response=False,
-        stateless=True,
-    )
-
-    async def asgi_handler(scope, receive, send):  # type: ignore[no-untyped-def]
-        await session_manager.handle_request(scope, receive, send)
-
-    @contextlib.asynccontextmanager
-    async def lifespan(app):  # type: ignore[no-untyped-def]
-        async with session_manager.run():
-            yield
-
-    starlette_app = Starlette(
-        routes=[Mount("/", app=asgi_handler)],
-        lifespan=lifespan,
+    # streamable_http_path="/" because the gateway strips /mcp/ga4-<brand> and
+    # forwards to "/". host="0.0.0.0" so the SDK's DNS-rebinding protection
+    # does not reject the "ga4_<brand>_mcp:8080" Host header that
+    # http-proxy-middleware (changeOrigin: true) sends.
+    starlette_app = app.streamable_http_app(
+        streamable_http_path="/",
+        stateless_http=True,
+        host="0.0.0.0",
     )
 
     config = uvicorn.Config(
