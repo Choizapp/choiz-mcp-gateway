@@ -44,7 +44,7 @@ import time
 from typing import Any
 
 import requests
-from mcp.server.fastmcp import FastMCP
+from mcp.server.mcpserver import MCPServer
 
 logger = logging.getLogger("tiktok_organic_mcp")
 logging.basicConfig(
@@ -205,22 +205,15 @@ def _truncate(s: Any, n: int) -> Any:
 
 # --- MCP server -----------------------------------------------------------
 
-# host="0.0.0.0" so the gateway can reach us across the docker bridge with
-#   Host: tiktok_organic_*_mcp:8080 (changeOrigin: true). FastMCP otherwise
-#   auto-enables DNS rebinding protection that rejects non-localhost Host
-#   headers — same gotcha as powerbi / warehouse.
-# streamable_http_path="/" so the gateway can strip /mcp/tiktok-organic-<brand>
-#   and forward to "/".
-# stateless_http=True: every request is an ephemeral session. Sidesteps the
-#   post-redeploy "stale Mcp-Session-Id" failure mode
-#   (feedback_stale_session_after_redeploy).
-mcp = FastMCP(
-    name=f"tiktok-organic-{BRAND}",
-    host="0.0.0.0",
-    port=8080,
-    streamable_http_path="/",
-    stateless_http=True,
-)
+# mcp 2.x renamed FastMCP to MCPServer and moved the transport settings OUT of
+# the constructor and INTO explicit keyword arguments on run(). They are passed
+# at the bottom of this file; the reason each one is needed is unchanged:
+# host="0.0.0.0" (the gateway reaches us with Host: <service>:8080 and the SDK
+# otherwise rejects non-localhost Host headers), streamable_http_path="/" (the
+# gateway strips the /mcp/<slug> prefix and forwards to "/"), and
+# stateless_http=True (sessions only exist on the legacy transport; keeping it
+# stateless sidesteps the stale-Mcp-Session-Id-after-redeploy wedge).
+mcp = MCPServer(name=f"tiktok-organic-{BRAND}")
 
 
 @mcp.tool()
@@ -408,7 +401,13 @@ def main() -> None:
         # Don't exit: a transient TikTok 5xx at boot shouldn't kill the
         # container. First tool call will retry.
 
-    mcp.run(transport="streamable-http")
+    mcp.run(
+        transport="streamable-http",
+        host="0.0.0.0",
+        port=8080,
+        streamable_http_path="/",
+        stateless_http=True,
+    )
 
 
 if __name__ == "__main__":
