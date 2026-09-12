@@ -57,12 +57,24 @@ RUN git clone https://github.com/Choizapp/choiz-facebook-mcp.git . \
 # the fork's runtime deps (its requirements.txt lists them as bare names).
 # We no longer need the [cli] extra: the previous image used `mcp run` to load
 # server.py over stdio; entrypoint.py imports it directly now.
-RUN pip install --no-cache-dir 'mcp==1.25.0' requests python-dotenv
+# mcp 2.x is REQUIRED: protocol revision 2026-07-28 removed the initialize
+# handshake and added the mandatory server/discover RPC. Every 1.x release tops
+# out at 2025-11-25 and answers the new revision with a bare HTTP 400, which the
+# client reports as "Connection closed" on every tool call. 2.x renamed FastMCP
+# to MCPServer; entrypoint.py shims the old module name for the fork. Pinned
+# EXACTLY -- a floating resolve is what broke this stack on 2026-08-24.
+RUN pip install --no-cache-dir 'mcp==2.2.0' requests python-dotenv
 
 # Flush stdout immediately so init logs land in `docker logs` without delay.
 ENV PYTHONUNBUFFERED=1
 
 COPY entrypoint.py /opt/entrypoint.py
+
+# Fail the BUILD, not production, if the SDK layout moves again. Executes
+# entrypoint.py's module body (not __main__), so the shim and the fork's import
+# through it are both exercised here instead of by a user.
+RUN python -c "import importlib.util; from mcp_types.version import KNOWN_PROTOCOL_VERSIONS as K; assert '2026-07-28' in K, K; spec=importlib.util.spec_from_file_location('e','/opt/entrypoint.py'); m=importlib.util.module_from_spec(spec); spec.loader.exec_module(m); print('import check OK, protocols:', K)"
+
 
 EXPOSE 8080
 

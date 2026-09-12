@@ -34,8 +34,13 @@ RUN apt-get update \
 # google-api-python-client ships the bundled gmail v1 discovery document, which
 # is what lets entrypoint.py build the client with static_discovery=True (no
 # network round-trip, no discovery cache on disk).
+# mcp 2.x is REQUIRED: protocol revision 2026-07-28 removed the initialize
+# handshake and added the mandatory server/discover RPC. Every 1.x release tops
+# out at 2025-11-25 and answers the new revision with a bare HTTP 400, which the
+# client reports as "Connection closed" on every tool call. 2.x renamed FastMCP
+# to MCPServer -- see entrypoint.py. Pinned EXACTLY.
 RUN pip install --no-cache-dir \
-    'mcp==1.25.0' \
+    'mcp==2.2.0' \
     'google-api-python-client>=2.140,<3' \
     'google-auth>=2.30,<3'
 
@@ -43,6 +48,12 @@ RUN pip install --no-cache-dir \
 ENV PYTHONUNBUFFERED=1
 
 COPY entrypoint.py /opt/entrypoint.py
+
+# Fail the BUILD, not production, if the SDK layout moves again. Asserts the
+# protocol revision and the exact transport kwargs run() forwards, plus a
+# syntax check of the entrypoint.
+RUN python -c "import inspect, py_compile, sys; from mcp.server.mcpserver import MCPServer; from mcp_types.version import KNOWN_PROTOCOL_VERSIONS as K; assert '2026-07-28' in K, K; p = inspect.signature(MCPServer.run_streamable_http_async).parameters; missing = [k for k in ('host','port','streamable_http_path','stateless_http') if k not in p]; sys.exit('run_streamable_http_async lost kwargs: %s' % missing) if missing else None; py_compile.compile('/opt/entrypoint.py', doraise=True); print('import check OK, protocols:', K)"
+
 
 EXPOSE 8080
 

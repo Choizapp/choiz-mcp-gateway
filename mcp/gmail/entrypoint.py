@@ -73,7 +73,7 @@ from google.auth.exceptions import RefreshError
 from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
-from mcp.server.fastmcp import FastMCP
+from mcp.server.mcpserver import MCPServer
 
 logger = logging.getLogger("gmail_mcp")
 logging.basicConfig(
@@ -467,17 +467,15 @@ def _instructions() -> str:
     )
 
 
-# host="0.0.0.0" so the gateway reaches us across the docker bridge.
-# streamable_http_path="/" so the gateway can strip /mcp/gmail-<brand> and
-#   forward "/".
-# stateless_http=True: ephemeral sessions, sidesteps stale-session-after-redeploy.
-mcp = FastMCP(
+# mcp 2.x renamed FastMCP to MCPServer and moved the transport settings OUT of
+# the constructor and INTO explicit keyword arguments on run(), passed at the
+# bottom of this file. The reason for each is unchanged: host="0.0.0.0" (the
+# gateway reaches us across the docker bridge), streamable_http_path="/" (the
+# gateway strips /mcp/gmail-<brand> and forwards "/"), stateless_http=True
+# (ephemeral sessions, sidesteps stale-session-after-redeploy).
+mcp = MCPServer(
     name=_server_name(),
     instructions=_instructions(),
-    host="0.0.0.0",
-    port=8080,
-    streamable_http_path="/",
-    stateless_http=True,
 )
 
 
@@ -764,7 +762,13 @@ def main() -> None:
                 key,
                 exc,
             )
-    mcp.run(transport="streamable-http")
+    mcp.run(
+        transport="streamable-http",
+        host="0.0.0.0",
+        port=8080,
+        streamable_http_path="/",
+        stateless_http=True,
+    )
 
 
 if __name__ == "__main__":
