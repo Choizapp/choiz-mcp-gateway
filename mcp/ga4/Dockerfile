@@ -36,7 +36,11 @@ FROM python:3.12-slim
 # replaced by the on_* constructor callbacks 2.x takes. See
 # Choizapp/choiz-google-analytics-mcp. Point back at Google and delete the fork
 # the day upstream ships 2.x support.
-ARG GA4_MCP_SHA=8644272d25f699cc085c92be00311fbe57b75e7b
+#
+# The pin is the commit on the fork's `feat/mcp-2x` branch, not its `main`:
+# `main` tracks Google's upstream verbatim, so pinning it would silently pull
+# the unmigrated code back in. Do not delete that branch.
+ARG GA4_MCP_SHA=0636b18af5179e24d98cc8b4d60e4c9bc4906cc3
 
 # git: pip install from a git URL needs git in the image at install time.
 # ca-certificates: HTTPS to analyticsdata.googleapis.com + GitHub.
