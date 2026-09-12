@@ -28,6 +28,21 @@ from __future__ import annotations
 import logging
 import os
 import sys
+import types as _pytypes
+
+from mcp.server.mcpserver import MCPServer
+
+# Stand-in for the module mcp 2.x removed. mcp-google-sheets still does
+# ``from mcp.server.fastmcp import FastMCP``; 2.x renamed that class to
+# MCPServer and deleted the old module (importing it now raises
+# ModuleNotFoundError pointing at the migration guide). Registering the
+# stand-in HERE, at our module's import time, guarantees it is in place before
+# main() imports the package. mcp 2.x is not optional: protocol revision
+# 2026-07-28 is unsupported by every 1.x release, which answers it with a bare
+# HTTP 400 that claude.ai reports as "Connection closed" on every tool call.
+_shim = _pytypes.ModuleType("mcp.server.fastmcp")
+_shim.FastMCP = MCPServer  # type: ignore[attr-defined]
+sys.modules["mcp.server.fastmcp"] = _shim
 
 
 # Tool classification for mcp-google-sheets 0.6.3 (verified against the
@@ -96,6 +111,22 @@ def _enforce_write_gate(mcp) -> None:
     if _writes_allowed():
         log.warning("SHEETS_ALLOW_WRITE is on — write tools ENABLED.")
         return
+    # mcp 2.x exposes remove_tool() publicly; prefer it over reaching into the
+    # private registry, which is exactly the kind of internal that moved when
+    # FastMCP became MCPServer. Keep the private path as a fallback so this
+    # still fails CLOSED (SystemExit) if neither is reachable.
+    remove = getattr(mcp, "remove_tool", None)
+    if callable(remove):
+        removed = []
+        for name in WRITE_TOOLS:
+            try:
+                remove(name)
+                removed.append(name)
+            except Exception:  # tool absent in this package version
+                pass
+        log.info("write gate enforced via remove_tool: %d write tools removed.",
+                 len(removed))
+        return
     try:
         registry = mcp._tool_manager._tools  # noqa: SLF001 - intentional
     except AttributeError:
@@ -138,40 +169,33 @@ def main() -> None:
     # bypassed by a version that ignores ENABLED_TOOLS.
     _enforce_write_gate(mcp)
 
-    # FastMCP defaults to "/mcp"; the gateway forwards to "/". Override before
-    # serving. Belt-and-suspenders: set it on settings (used to build the ASGI
-    # app) regardless of the SDK minor version's attribute layout.
-    try:
-        mcp.settings.streamable_http_path = "/"
-    except AttributeError:  # pragma: no cover - SDK layout drift guard
-        logging.getLogger(__name__).warning(
-            "could not set streamable_http_path on mcp.settings; "
-            "relying on FASTMCP_STREAMABLE_HTTP_PATH env instead"
-        )
-
-    # stateless_http: every request is its own ephemeral session.
-    #
-    # FastMCP defaults to stateful, and 2026-08-24 showed the cost. After this
-    # container was replaced by a redeploy, claude.ai kept sending the
-    # Mcp-Session-Id of the container that no longer existed; the SDK answers an
-    # unknown session with 400 (visible as `"POST / HTTP/1.1" 400 Bad Request`
-    # in the logs), the MCP spec says 404, and claude.ai only re-initializes on
-    # 404. The connector stays wedged until a human reconnects it — on every
-    # redeploy. See memory feedback_stale_session_after_redeploy.
-    try:
-        mcp.settings.stateless_http = True
-    except AttributeError:  # pragma: no cover - SDK layout drift guard
-        logging.getLogger(__name__).error(
-            "could not set stateless_http on mcp.settings — this container will "
-            "wedge claude.ai connectors on every redeploy until reconnected"
-        )
-
     logging.getLogger(__name__).info(
         "Google Sheets MCP starting on %s:%s (streamable-http, path=/, stateless)",
         os.environ.get("HOST", "0.0.0.0"),
         os.environ.get("PORT", "8080"),
     )
-    mcp.run(transport="streamable-http")
+    # In mcp 2.x the transport settings moved out of Settings and into explicit
+    # kwargs on run(), which also removes the old "did the attribute move?"
+    # guesswork this file used to guard against.
+    #
+    # streamable_http_path="/" because the gateway strips /mcp/sheets and
+    # forwards to "/". host="0.0.0.0" so the SDK's DNS-rebinding protection does
+    # not reject the "sheets_mcp:8080" Host header that http-proxy-middleware
+    # (changeOrigin: true) sends.
+    #
+    # stateless_http=True: sessions only exist on the legacy (<= 2025-11-25)
+    # transport, and keeping them costs a manual reconnect on every redeploy --
+    # claude.ai keeps sending the Mcp-Session-Id of the replaced container, the
+    # SDK answers an unknown session with 400, the spec says 404, and claude.ai
+    # only re-initializes on 404. That wedge hit this very image on 2026-08-24.
+    # See memory feedback_stale_session_after_redeploy.
+    mcp.run(
+        transport="streamable-http",
+        host="0.0.0.0",
+        port=8080,
+        streamable_http_path="/",
+        stateless_http=True,
+    )
 
 
 if __name__ == "__main__":

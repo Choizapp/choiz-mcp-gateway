@@ -50,18 +50,31 @@ RUN apt-get update \
 # running in production on 2026-08-24, not aspirational ones.
 #
 # NOTE the two-package trap (memory feedback_two_fastmcp_packages): this image
-# uses the STANDALONE `fastmcp` (gofastmcp.com, 3.x), which is why it survived
-# the SDK move that killed warehouse. Both are pinned anyway — `mcp` still comes
-# along as a dependency and an unpinned floor is what bit us.
+# uses the STANDALONE `fastmcp` (gofastmcp.com), NOT `mcp.server.fastmcp` from
+# the official SDK. That is why it survived the SDK move that killed warehouse.
+#
+# Bumped 2026-09-11 from fastmcp 3.4.7 / mcp 1.29.0. Protocol revision
+# 2026-07-28 — which claude.ai switched to that day — is only spoken by the mcp
+# 2.x SDK; 1.29.0 tops out at 2025-11-25 and answers the new revision with a
+# bare HTTP 400, which surfaces to the client as "Connection closed" on every
+# tool call. fastmcp 4.0.3 is the first standalone release built on mcp 2.x, so
+# for THIS image the fix is a version bump rather than the FastMCP -> MCPServer
+# rewrite the SDK-based images needed. Verified in a clean container: fastmcp
+# 4.0.3 pulls mcp 2.2.0 and reports 2026-07-28 among its known revisions.
+# Both stay pinned EXACTLY — an unpinned floor is what bit us on 2026-08-24.
 RUN pip install --no-cache-dir \
     "git+https://github.com/googleads/google-ads-mcp.git@${GOOGLE_ADS_MCP_SHA}" \
-    "fastmcp==3.4.7" \
-    "mcp==1.29.0"
+    "fastmcp==4.0.3" \
+    "mcp==2.2.0"
 
 # Fail the BUILD, not production, if either package's layout moves. Only the top
 # packages are imported: `ads_mcp.server` registers tools and wants credentials,
 # which are not present at build time.
-RUN python -c "import fastmcp, ads_mcp; print('import check OK')"
+RUN python -c "\
+import fastmcp, ads_mcp, importlib.metadata as m; \
+from mcp_types.version import KNOWN_PROTOCOL_VERSIONS as K; \
+assert '2026-07-28' in K, K; \
+print('import check OK, fastmcp', m.version('fastmcp'), 'mcp', m.version('mcp'), K)"
 
 # Strip build deps once wheels are compiled to keep the final layer slim.
 RUN apt-get purge -y --auto-remove build-essential && rm -rf /var/lib/apt/lists/*

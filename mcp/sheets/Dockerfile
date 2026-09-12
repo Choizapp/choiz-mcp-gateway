@@ -53,7 +53,7 @@ RUN apt-get update \
 # 1.25.0 is the version the rest of the SDK-based stack runs.
 RUN pip install --no-cache-dir \
     "mcp-google-sheets==${SHEETS_MCP_VERSION}" \
-    "mcp==1.25.0" \
+    "mcp==2.2.0" \
     "uvicorn[standard]"
 
 # Fail the BUILD, not production, if the SDK layout moves again.
@@ -62,7 +62,7 @@ RUN pip install --no-cache-dir \
 # builds the FastMCP instance and may want CREDENTIALS_CONFIG, which does not
 # exist at build time — a check that can fail for the wrong reason is worse than
 # a narrower one.
-RUN python -c "import mcp.server.fastmcp, mcp_google_sheets; import importlib.metadata as m; print('import check OK, mcp', m.version('mcp'))"
+RUN python -c "import mcp_google_sheets; import importlib.metadata as m; print('package check OK, mcp', m.version('mcp'))"
 
 # Flush stdout immediately so init logs land in `docker logs` without delay.
 ENV PYTHONUNBUFFERED=1
@@ -77,6 +77,22 @@ ENV HOST=0.0.0.0 \
     FASTMCP_STREAMABLE_HTTP_PATH=/
 
 COPY entrypoint.py /opt/entrypoint.py
+
+# Fail the BUILD, not production, if the SDK layout moves again. Executes
+# entrypoint.py's module body — which installs the mcp.server.fastmcp stand-in —
+# and THEN imports mcp_google_sheets through it, so the shim is exercised here
+# rather than by a user. The earlier check imported mcp.server.fastmcp directly;
+# that module no longer exists in mcp 2.x, which is the whole reason for the
+# shim. Protocol revision 2026-07-28 is asserted too: every mcp 1.x release
+# answers it with a bare HTTP 400 that claude.ai reports as "Connection closed".
+RUN python -c "\
+import importlib.util, importlib.metadata as m; \
+from mcp_types.version import KNOWN_PROTOCOL_VERSIONS as K; \
+assert '2026-07-28' in K, K; \
+spec=importlib.util.spec_from_file_location('e','/opt/entrypoint.py'); \
+mod=importlib.util.module_from_spec(spec); spec.loader.exec_module(mod); \
+import mcp_google_sheets; \
+print('import check OK, mcp', m.version('mcp'), K)"
 
 EXPOSE 8080
 
