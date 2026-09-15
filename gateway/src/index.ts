@@ -176,8 +176,8 @@ function resolveRemoteAuthValue(cfg: RemoteUpstream): string | undefined {
 }
 const remoteUpstreams: Record<string, RemoteUpstream> = {
   // Kapso is project-scoped: one API key = one project. We expose one slug
-  // per project (choiz/timeless × sales/support). The OTP project that
-  // originally backed `/mcp/kapso` was retired 2026-05-22.
+  // per project (choiz/timeless × sales/support, plus affiliates). The OTP
+  // project that originally backed `/mcp/kapso` was retired 2026-05-22.
   "/mcp/kapso-choiz-sales": {
     target: "https://app.kapso.ai/mcp",
     apiKeyEnv: "KAPSO_API_KEY_CHOIZ_SALES",
@@ -196,6 +196,14 @@ const remoteUpstreams: Record<string, RemoteUpstream> = {
   "/mcp/kapso-timeless-support": {
     target: "https://app.kapso.ai/mcp",
     apiKeyEnv: "KAPSO_API_KEY_TIMELESS_SUPPORT",
+    apiKeyHeader: "x-api-key",
+  },
+  // Affiliates program. Deliberately NOT slugged per brand: the program is
+  // cross-brand, so there is no kapso-choiz-/kapso-timeless- prefix to pick
+  // between and the route name matches the Kapso project 1:1.
+  "/mcp/kapso-affiliates": {
+    target: "https://app.kapso.ai/mcp",
+    apiKeyEnv: "KAPSO_API_KEY_AFFILIATES",
     apiKeyHeader: "x-api-key",
   },
   // Mixpanel hosts an official Streamable HTTP MCP. Headless auth is a service
