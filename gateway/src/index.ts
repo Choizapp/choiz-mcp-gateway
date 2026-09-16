@@ -198,9 +198,10 @@ const remoteUpstreams: Record<string, RemoteUpstream> = {
     apiKeyEnv: "KAPSO_API_KEY_TIMELESS_SUPPORT",
     apiKeyHeader: "x-api-key",
   },
-  // Affiliates program. Deliberately NOT slugged per brand: the program is
-  // cross-brand, so there is no kapso-choiz-/kapso-timeless- prefix to pick
-  // between and the route name matches the Kapso project 1:1.
+  // Affiliates program (Kapso project "Choiz (Affiliates)"). Note this slug
+  // breaks the kapso-<brand>-<role> convention the other four follow — it is
+  // a deliberate naming call, not an oversight. If a Timeless affiliates
+  // project ever appears, this one has to be renamed too.
   "/mcp/kapso-affiliates": {
     target: "https://app.kapso.ai/mcp",
     apiKeyEnv: "KAPSO_API_KEY_AFFILIATES",
