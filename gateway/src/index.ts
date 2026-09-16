@@ -176,8 +176,8 @@ function resolveRemoteAuthValue(cfg: RemoteUpstream): string | undefined {
 }
 const remoteUpstreams: Record<string, RemoteUpstream> = {
   // Kapso is project-scoped: one API key = one project. We expose one slug
-  // per project (choiz/timeless × sales/support). The OTP project that
-  // originally backed `/mcp/kapso` was retired 2026-05-22.
+  // per project (choiz/timeless × sales/support, plus affiliates). The OTP
+  // project that originally backed `/mcp/kapso` was retired 2026-05-22.
   "/mcp/kapso-choiz-sales": {
     target: "https://app.kapso.ai/mcp",
     apiKeyEnv: "KAPSO_API_KEY_CHOIZ_SALES",
@@ -196,6 +196,15 @@ const remoteUpstreams: Record<string, RemoteUpstream> = {
   "/mcp/kapso-timeless-support": {
     target: "https://app.kapso.ai/mcp",
     apiKeyEnv: "KAPSO_API_KEY_TIMELESS_SUPPORT",
+    apiKeyHeader: "x-api-key",
+  },
+  // Affiliates program (Kapso project "Choiz (Affiliates)"). Note this slug
+  // breaks the kapso-<brand>-<role> convention the other four follow — it is
+  // a deliberate naming call, not an oversight. If a Timeless affiliates
+  // project ever appears, this one has to be renamed too.
+  "/mcp/kapso-affiliates": {
+    target: "https://app.kapso.ai/mcp",
+    apiKeyEnv: "KAPSO_API_KEY_AFFILIATES",
     apiKeyHeader: "x-api-key",
   },
   // Mixpanel hosts an official Streamable HTTP MCP. Headless auth is a service
