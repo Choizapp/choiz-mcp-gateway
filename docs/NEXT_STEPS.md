@@ -155,6 +155,21 @@ Ni fork ni reescritura: un **puente** en `mcp/gsc/entrypoint.mjs`.
 - Los errores del upstream (args invalidos, errores de la API de Google) vuelven
   como `isError: true` con el mensaje, no como error JSON-RPC.
 
+**Aislamiento por marca (2026-10-19, segundo PR).** La service account ve las
+dos propiedades, y los dos contenedores eran identicos: `gsc-timeless` podia
+consultar choiz.com.mx y viceversa. Ahora cada servicio recibe `GSC_SITE_URL`
+en `compose.yml`; el puente saca `siteUrl` de todas las tools, lo completa del
+lado del servidor, filtra `list_sites` y rechaza cualquier otra propiedad. Sin
+`GSC_SITE_URL` el contenedor no arranca. El limite vive en el codigo, no en la
+credencial: una service account por propiedad seria la garantia fuerte.
+
+En el mismo PR, `deploy-gateway.yml` deja de reconstruir TODAS las imagenes
+cuando cambia solo `compose.yml` (asi se origino el outage del 2026-08-24).
+Produccion lee `:latest` y las versiones viven en cada Dockerfile, asi que un
+cambio de env no necesita build; el deploy sigue corriendo igual.
+
+Pendiente: `submit_sitemap` es la unica tool que escribe. Evaluar si la sacamos.
+
 Correccion a lo que deciamos antes: SI hay SDK de JS 2.x. El paquete
 `@modelcontextprotocol/sdk` sigue en 1.x (1.32.1 topea en 2025-11-25), pero
 la linea 2.x se publica como paquetes separados (`server`, `client`, `node`,

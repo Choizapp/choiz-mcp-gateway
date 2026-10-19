@@ -30,6 +30,19 @@
 // `GSC_SERVICE_ACCOUNT_JSON_B64` (compose-level alias of
 // `GA4_SERVICE_ACCOUNT_JSON_B64`); decoded once at startup to
 // /tmp/gsc-sa.json (chmod 600) and the path is passed into createServer().
+//
+// Tenant scope: that service account can read BOTH properties
+// (choiz.com.mx and gotimeless.ai), so until 2026-10-19 either connector
+// could query either brand. Each container is now pinned to one property via
+// `GSC_SITE_URL` (set per service in compose.yml), the same "the route IS
+// the brand" rule as powerbi: `siteUrl` is dropped from every tool schema and
+// filled in server-side, `list_sites` returns only this property, and a call
+// naming any other property is refused rather than silently redirected — a
+// model holding a stale schema should learn it asked the wrong connector, not
+// get the other brand's numbers under the wrong name. The startup fails if
+// `GSC_SITE_URL` is unset: an unscoped container must never come up.
+// The scope lives in code, not in the credential; separate service accounts
+// per property would be the stronger guarantee.
 
 import { createServer as createUpstreamServer } from "./dist/server.js";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
@@ -57,6 +70,41 @@ function materializeServiceAccount() {
 const credentialsPath = materializeServiceAccount();
 console.error(`GSC MCP: credentials path=${credentialsPath}`);
 
+const SITE_URL = process.env.GSC_SITE_URL;
+if (!SITE_URL) {
+  throw new Error("GSC_SITE_URL env var is required (e.g. sc-domain:gotimeless.ai)");
+}
+console.error(`GSC MCP: scoped to ${SITE_URL}`);
+
+// Every tool except list_sites takes a `siteUrl`; remove it from the schema
+// the model sees and say in the description which property the tool hits.
+function scopeTool(tool) {
+  const inputSchema = structuredClone(tool.inputSchema);
+  delete inputSchema.properties?.siteUrl;
+  if (Array.isArray(inputSchema.required)) {
+    inputSchema.required = inputSchema.required.filter((k) => k !== "siteUrl");
+    if (inputSchema.required.length === 0) delete inputSchema.required;
+  }
+  const description =
+    tool.name === "list_sites"
+      ? `Returns the Search Console property this connector serves (${SITE_URL}).`
+      : `${tool.description}. Always runs against the Search Console property ${SITE_URL}; ` +
+        `this connector cannot query any other property.`;
+  return { ...tool, description, inputSchema };
+}
+
+function toolError(text) {
+  return { content: [{ type: "text", text }], isError: true };
+}
+
+// list_sites returns every property the credential can see; keep only ours.
+function scopeListSites(result) {
+  const text = result.content?.[0]?.text;
+  const data = JSON.parse(text);
+  data.siteEntry = (data.siteEntry ?? []).filter((s) => s.siteUrl === SITE_URL);
+  return { ...result, content: [{ type: "text", text: JSON.stringify(data, null, 2) }] };
+}
+
 // --- Inside: the upstream v1 server, reached through an in-process client.
 // The upstream handlers build a fresh SearchConsoleService per call and keep
 // no state between calls, so one shared pair serves concurrent requests.
@@ -77,24 +125,31 @@ function buildServer() {
 
   server.setRequestHandler("tools/list", async () => {
     const { tools } = await bridge.listTools();
-    return { tools };
+    return { tools: tools.map(scopeTool) };
   });
 
   server.setRequestHandler("tools/call", async (request) => {
     const { name, arguments: args } = request.params;
+    const requested = args?.siteUrl;
+    if (requested !== undefined && requested !== SITE_URL) {
+      return toolError(
+        `This connector only serves the Search Console property ${SITE_URL}; ` +
+          `'${requested}' belongs to a different connector.`,
+      );
+    }
     try {
-      return await bridge.callTool({ name, arguments: args ?? {} }, undefined, {
-        timeout: TOOL_CALL_TIMEOUT_MS,
-      });
+      const result = await bridge.callTool(
+        { name, arguments: { ...(args ?? {}), siteUrl: SITE_URL } },
+        undefined,
+        { timeout: TOOL_CALL_TIMEOUT_MS },
+      );
+      return name === "list_sites" && !result.isError ? scopeListSites(result) : result;
     } catch (err) {
       // Upstream reports bad arguments, unknown tools and Google API
       // failures by throwing. Hand them back as a tool error so the model
       // reads the message, instead of a JSON-RPC error claude.ai shows as a
       // generic "Error occurred during tool execution".
-      return {
-        content: [{ type: "text", text: String(err?.message ?? err) }],
-        isError: true,
-      };
+      return toolError(String(err?.message ?? err));
     }
   });
 

@@ -199,30 +199,28 @@ services:
     pids_limit: 100
     restart: unless-stopped
 
-  # GSC MCP — multi-tenant, mirrors ga4 except: no per-tenant env (the
-  # public mcp-server-gsc package has no site-filter env var). Two
-  # services exist purely to expose two slugs in claude.ai
-  # (/mcp/gsc-choiz vs /mcp/gsc-timeless); the model picks the right
-  # `siteUrl` per-tool-call based on the connector slug. Both services
-  # use the SAME service-account JSON as GA4 (single Choiz reader account
-  # with access to both Choiz + Timeless GSC sites). The compose-level
-  # rename surfaces it as GSC_SERVICE_ACCOUNT_JSON_B64 inside the
-  # container so the GSC entrypoint doesn't read a "GA4_*" name.
+  # GSC MCP — multi-tenant, one container per Search Console property.
+  # Both services use the SAME service-account JSON as GA4 (single Choiz
+  # reader account that can see choiz.com.mx AND gotimeless.ai). The
+  # compose-level rename surfaces it as GSC_SERVICE_ACCOUNT_JSON_B64 inside
+  # the container so the GSC entrypoint doesn't read a "GA4_*" name.
   #
-  # Cutover 2026-05-07 (PR): supergateway dropped. /opt/entrypoint.mjs
-  # imports the package's `createServer` builder and mounts it behind
-  # StreamableHTTPServerTransport in-process — same shape as
-  # warehouse / facebook / instagram / ga4 / google-ads, just in Node.
-  # Pre-fix gsc_choiz_mcp ran at ~489 MiB resident under the
-  # supergateway --stateless leak; expect a similar drop here as the
-  # other Phase 1 MCPs.
+  # Because that one credential sees both brands, the brand boundary is
+  # GSC_SITE_URL: the entrypoint drops `siteUrl` from every tool, fills it
+  # with this value, filters list_sites to it, and refuses calls naming any
+  # other property. Missing value = container refuses to start. Before
+  # 2026-10-19 both containers were identical and either slug could read
+  # either brand.
   #
-  # mem_limit retained at 1500m for now — actual post-fix resident is
-  # likely 50-100 MiB. Revisit after stress test.
+  # Image: upstream ahonn/mcp-server-gsc (SDK v1, untouched) bridged in-process
+  # to the v2 SDK, which speaks MCP revision 2026-07-28 (PR #82). Stateless.
+  #
+  # mem_limit retained at 1500m for now — actual resident is ~50-100 MiB.
   gsc_choiz_mcp:
     image: ghcr.io/choizapp/choiz-mcp-gateway/gsc:${IMAGE_TAG:-latest}
     environment:
       GSC_SERVICE_ACCOUNT_JSON_B64: ${GA4_SERVICE_ACCOUNT_JSON_B64:?set GA4_SERVICE_ACCOUNT_JSON_B64 in .env}
+      GSC_SITE_URL: "sc-domain:choiz.com.mx"
     mem_limit: 1500m
     pids_limit: 100
     restart: unless-stopped
@@ -231,6 +229,7 @@ services:
     image: ghcr.io/choizapp/choiz-mcp-gateway/gsc:${IMAGE_TAG:-latest}
     environment:
       GSC_SERVICE_ACCOUNT_JSON_B64: ${GA4_SERVICE_ACCOUNT_JSON_B64:?set GA4_SERVICE_ACCOUNT_JSON_B64 in .env}
+      GSC_SITE_URL: "sc-domain:gotimeless.ai"
     mem_limit: 1500m
     pids_limit: 100
     restart: unless-stopped
