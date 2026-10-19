@@ -4,8 +4,8 @@
 # Source: https://github.com/ahonn/mcp-server-gsc — public package, no
 # Choiz fork. Cloned at build time at a pinned commit and built locally
 # (the published npm tarball ships only the stdio launcher; we want
-# `dist/server.js`'s `createServer` builder so we can wire it through
-# the MCP TS SDK's StreamableHTTPServerTransport directly).
+# `dist/server.js`'s `createServer` builder so entrypoint.mjs can bridge
+# it to the v2 SDK in-process).
 #
 # History: previously bundled supergateway to translate the package's
 # stdio MCP into Streamable HTTP. Same supergateway --stateless leak
@@ -59,28 +59,39 @@ WORKDIR /app
 # 1.26.0 is the version measured running in production on 2026-08-24, and it
 # satisfies upstream's range — this pins what already works rather than moving it.
 # --save-exact so the write into package.json cannot drift either.
+#
+# Two SDK generations live side by side (2026-10-19). The v1 SDK stays at
+# 1.26.0 because the upstream server is written against it, and it only ever
+# talks to our bridge client in-process. The v2 packages are what face the
+# wire: `@modelcontextprotocol/server` speaks revision 2026-07-28, which no
+# 1.x release does (1.32.1 still caps at 2025-11-25), and
+# `@modelcontextprotocol/node` adapts its fetch handler to node:http. See
+# entrypoint.mjs. The v2 server brings its own zod 4 nested under it; the
+# upstream's zod 3 stays top-level.
 RUN git clone https://github.com/ahonn/mcp-server-gsc.git . \
  && git checkout "${GSC_MCP_SHA}" \
  && npm install \
- && npm install --save-exact "@modelcontextprotocol/sdk@1.26.0" \
+ && npm install --save-exact \
+      "@modelcontextprotocol/sdk@1.26.0" \
+      "@modelcontextprotocol/server@2.3.1" \
+      "@modelcontextprotocol/node@2.1.1" \
  && npm run build \
  && npm prune --production \
- && node -e "console.log('sdk pinned at', require('/app/node_modules/@modelcontextprotocol/sdk/package.json').version)"
+ && node -e "for (const p of ['sdk','server','node']) console.log(p, 'pinned at', require('/app/node_modules/@modelcontextprotocol/' + p + '/package.json').version)"
 
-# Fail the BUILD, not production, if the SDK entrypoint.mjs imports ever move.
-# These are the exact specifiers it uses.
-RUN node --input-type=module -e "import '@modelcontextprotocol/sdk/server/streamableHttp.js'; import '@modelcontextprotocol/sdk/types.js'; console.log('import check OK')"
+# Fail the BUILD, not production, if any import entrypoint.mjs uses ever moves.
+# These are the exact specifiers and names it imports.
+RUN node --input-type=module -e "import { Client } from '@modelcontextprotocol/sdk/client/index.js'; import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js'; import { Server, createMcpHandler } from '@modelcontextprotocol/server'; import { toNodeHandler } from '@modelcontextprotocol/node'; for (const [n, v] of Object.entries({ Client, InMemoryTransport, Server, createMcpHandler, toNodeHandler })) if (typeof v !== 'function') throw new Error(n + ' missing'); console.log('import check OK')"
 
-# Our streamable-http launcher. Bundled in /app so its
-# `import "./dist/server.js"` resolves correctly and so its
-# `import "@modelcontextprotocol/sdk/server/streamableHttp.js"` finds
-# the SDK in /app/node_modules.
+# Our HTTP launcher. Bundled in /app so its `import "./dist/server.js"`
+# resolves correctly and so both SDK generations resolve from
+# /app/node_modules.
 COPY entrypoint.mjs /app/entrypoint.mjs
 
 EXPOSE 8080
 
-# `node /app/entrypoint.mjs` decodes the SA JSON, builds the GSC
-# Server, mounts it behind StreamableHTTPServerTransport and binds a
-# Node http server on 0.0.0.0:8080. No supergateway, no per-request
-# child spawning.
+# `node /app/entrypoint.mjs` decodes the SA JSON, builds the upstream GSC
+# Server behind an in-process client, and serves it through the v2 SDK's
+# createMcpHandler on a Node http server on 0.0.0.0:8080. No supergateway,
+# no per-request child spawning.
 ENTRYPOINT ["node", "/app/entrypoint.mjs"]

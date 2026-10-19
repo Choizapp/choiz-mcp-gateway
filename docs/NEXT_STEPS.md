@@ -120,6 +120,7 @@ terceros sin migrar es un outage futuro.
 | google-ads | bump a `fastmcp` 4.0.3, la primera standalone sobre mcp 2.x |
 | instagram x2 | fork propio migrado en Choizapp/choiz-instagram-mcp#2 |
 | ga4 x2 | fork nuevo Choizapp/choiz-google-analytics-mcp (upstream se capeo en `mcp<2`) |
+| gsc x2 | puente en `mcp/gsc/entrypoint.mjs`: SDK JS v2 afuera, upstream v1 intacto adentro (2026-10-19) |
 
 Dos patrones utiles que aparecieron:
 
@@ -135,27 +136,30 @@ Dos patrones utiles que aparecieron:
 
 meta-ads, shopify x2. Ver la seccion de bajas mas arriba.
 
-### PENDIENTE: gsc x2
+### gsc x2 - migrado 2026-10-19
 
-Unico que queda sin migrar. **Cero tool calls en 30 dias**, pero tiene un
-consumidor real: la skill `blog-analyst` usa `enhanced_search_analytics` y
-`detect_quick_wins`.
+Quedo caido desde el 2026-09-11 como el resto, y fue el ultimo en migrarse
+porque nadie lo uso en 30 dias. Lo destrabo un pedido real: datos del blog
+para Timeless. Verificado en vivo antes del fix: `server/discover` contra
+`gsc_timeless_mcp` devolvia HTTP 400 "No valid session ID provided".
 
-Es Node, y ahi el problema es distinto: `@modelcontextprotocol/sdk` 1.30.0
-tambien topea en 2025-11-25. El protocolo nuevo vive en paquetes nuevos
-(`@modelcontextprotocol/server@2.0.0`), asi que no es un bump sino migrar el
-fork de `ahonn/mcp-server-gsc` a una API distinta.
+Ni fork ni reescritura: un **puente** en `mcp/gsc/entrypoint.mjs`.
 
-Dos caminos, a decidir:
+- Adentro, el `createServer()` del upstream `ahonn/mcp-server-gsc` (SDK v1
+  1.26.0, sin tocar) conectado una sola vez a un `Client` v1 por
+  `InMemoryTransport`. El handshake 2025 ocurre en el proceso, nunca en la red.
+- Afuera, un `Server` de `@modelcontextprotocol/server@2.3.1` servido con
+  `createMcpHandler` + `toNodeHandler` de `@modelcontextprotocol/node@2.1.1`.
+  Habla 2026-07-28 y atiende 2025 en modo stateless desde la misma factory.
+  `tools/list` y `tools/call` reenvian al cliente v1.
+- Los errores del upstream (args invalidos, errores de la API de Google) vuelven
+  como `isError: true` con el mensaje, no como error JSON-RPC.
 
-1. Forkear `ahonn/mcp-server-gsc` y migrarlo a `@modelcontextprotocol/server@2.x`,
-   igual que se hizo con instagram y ga4 en Python.
-2. Reescribirlo first-party en Python sobre `MCPServer` y la Search Console API.
-   Son 8 tools, dos de ellas con logica analitica propia
-   (`enhanced_search_analytics`, `detect_quick_wins`) que habria que replicar.
-
-Si al revisar el uso sigue en cero cuando alguien lo necesite, la tercera
-opcion es retirarlo como meta-ads y shopify.
+Correccion a lo que deciamos antes: SI hay SDK de JS 2.x. El paquete
+`@modelcontextprotocol/sdk` sigue en 1.x (1.32.1 topea en 2025-11-25), pero
+la linea 2.x se publica como paquetes separados (`server`, `client`, `node`,
+`core`), estable desde 2.0.0 (2026-07-27). El endpoint escrito a mano del
+repo timeless ya no es la unica salida en TypeScript.
 
 ## Not started / next up
 

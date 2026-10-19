@@ -1,42 +1,47 @@
-// GSC MCP entrypoint — serves ahonn/mcp-server-gsc via streamable-http
-// without supergateway, using the canonical MCP TS SDK per-session pattern.
+// GSC MCP entrypoint — serves ahonn/mcp-server-gsc over MCP revision
+// 2026-07-28, with the 2025-era protocol kept as a stateless fallback.
 //
-// The upstream package's `src/index.ts` ships only a stdio launcher; its
-// `src/remote.ts` is a Cloudflare Workers / Hono variant that doesn't
-// bind to a Node port. Both reuse `createServer(credentials): Server`
-// from `src/server.ts`. That builder instantiates a fresh `Server` per
-// call (no shared state across calls — verified upstream at SHA
-// e671b155), so it's safe to invoke once per MCP session.
+// Why this exists: claude.ai switched to revision 2026-07-28 on 2026-09-11.
+// That revision removed the `initialize` handshake and `Mcp-Session-Id`,
+// made `server/discover` mandatory and moved the protocol version into a
+// `params._meta` envelope. `@modelcontextprotocol/sdk` 1.x (the SDK the
+// upstream package is written against) tops out at 2025-11-25 and answers
+// a modern request with a bare HTTP 400 — claude.ai shows the connector as
+// Connected but every tool call fails with "Connection closed". Verified
+// live on 2026-10-19: `server/discover` against gsc_timeless_mcp returned
+// 400 "No valid session ID provided".
 //
-// Architecture (canonical MCP TS SDK session pattern — same shape as
-// mcp/shopify/entrypoint.mjs post-PR #21):
-//   * Module-level: the service-account JSON is decoded once to disk.
-//     The path is stateless w.r.t. MCP sessions and shared across all.
-//   * Per HTTP session: a fresh `Server` from `createServer(path)` +
-//     fresh `StreamableHTTPServerTransport`, stored in `transports`
-//     keyed by Mcp-Session-Id. Sharing a single Server across sessions
-//     causes "Server already initialized" on the second `initialize`
-//     request — surfaces in claude.ai as a generic "Authorization
-//     failed + ofid_..." error.
+// Shape: a BRIDGE, not a fork.
+//   * Inside: the upstream `createServer(credentials)` — a v1 lowlevel
+//     Server holding the 8 GSC tools and their analytics logic, untouched —
+//     connected ONCE at startup to a v1 Client over an in-memory transport.
+//     The 2025-era handshake happens in-process and never touches the wire.
+//   * Outside: a v2 `Server` from `@modelcontextprotocol/server`, served by
+//     `createMcpHandler`. It speaks 2026-07-28 (discover, `_meta` envelope,
+//     resultType, cache hints) and also answers 2025-era requests
+//     statelessly from the same factory, so both eras stay in sync.
+//     `tools/list` and `tools/call` forward to the v1 Client.
 //
-// Why the rewrite: smoke test on 2026-05-19 (post tiktok-organic deploy)
-// hit `gsc-choiz` with HTTP 400 "Invalid Request: Server already
-// initialized" on a fresh initialize call. The pre-existing single-
-// shared-Server pattern was already documented as a latent bug
-// (project_gsc_latent_session_bug). This change applies the fix.
+// Replaces the previous per-session StreamableHTTPServerTransport map
+// (PR #32). Stateless also removes the stale-Mcp-Session-Id-after-redeploy
+// failure mode: there is no session to go stale.
 //
 // Auth: Choiz `ga4-mcp-reader` service-account JSON arrives via
 // `GSC_SERVICE_ACCOUNT_JSON_B64` (compose-level alias of
 // `GA4_SERVICE_ACCOUNT_JSON_B64`); decoded once at startup to
-// /tmp/gsc-sa.json (chmod 600) and the path is passed into
-// createServer() per session.
+// /tmp/gsc-sa.json (chmod 600) and the path is passed into createServer().
 
-import { createServer } from "./dist/server.js";
-import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
-import { isInitializeRequest } from "@modelcontextprotocol/sdk/types.js";
-import { randomUUID } from "node:crypto";
+import { createServer as createUpstreamServer } from "./dist/server.js";
+import { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
+import { Server, createMcpHandler } from "@modelcontextprotocol/server";
+import { toNodeHandler } from "@modelcontextprotocol/node";
 import { writeFileSync, chmodSync } from "node:fs";
 import http from "node:http";
+
+// enhanced_search_analytics can pull up to 25K rows; the v1 Client's 60s
+// default request timeout is too tight for that.
+const TOOL_CALL_TIMEOUT_MS = 180_000;
 
 function materializeServiceAccount() {
   const b64 = process.env.GSC_SERVICE_ACCOUNT_JSON_B64;
@@ -52,114 +57,59 @@ function materializeServiceAccount() {
 const credentialsPath = materializeServiceAccount();
 console.error(`GSC MCP: credentials path=${credentialsPath}`);
 
-// Session-id -> transport. Each transport is bound to its own Server at
-// creation time. Cleared via transport.onclose when claude.ai
-// terminates the session (or it times out).
-const transports = Object.create(null);
+// --- Inside: the upstream v1 server, reached through an in-process client.
+// The upstream handlers build a fresh SearchConsoleService per call and keep
+// no state between calls, so one shared pair serves concurrent requests.
+const upstream = createUpstreamServer(credentialsPath);
+const [clientSide, serverSide] = InMemoryTransport.createLinkedPair();
+await upstream.connect(serverSide);
+const bridge = new Client({ name: "choiz-gsc-bridge", version: "1.0.0" });
+await bridge.connect(clientSide);
 
-async function readJsonBody(req) {
-  return new Promise((resolve, reject) => {
-    const chunks = [];
-    req.on("data", (c) => chunks.push(c));
-    req.on("end", () => {
-      if (chunks.length === 0) return resolve(undefined);
-      try {
-        resolve(JSON.parse(Buffer.concat(chunks).toString("utf8")));
-      } catch (err) {
-        reject(err);
-      }
-    });
-    req.on("error", reject);
-  });
-}
-
-function send400(res, message) {
-  if (res.headersSent) return;
-  res.statusCode = 400;
-  res.setHeader("content-type", "application/json");
-  res.end(
-    JSON.stringify({
-      jsonrpc: "2.0",
-      error: { code: -32000, message },
-      id: null,
-    }),
+// --- Outside: one v2 Server per request (createMcpHandler calls the factory
+// per exchange). Only `tools` is advertised: upstream also declares
+// resources/prompts but registers no handlers for them.
+function buildServer() {
+  const server = new Server(
+    { name: "mcp-server-gsc", version: "0.3.0" },
+    { capabilities: { tools: {} } },
   );
-}
 
-async function handle(req, res) {
-  const sessionId = req.headers["mcp-session-id"];
-  const method = req.method || "GET";
+  server.setRequestHandler("tools/list", async () => {
+    const { tools } = await bridge.listTools();
+    return { tools };
+  });
 
-  if (method === "POST") {
-    let body;
+  server.setRequestHandler("tools/call", async (request) => {
+    const { name, arguments: args } = request.params;
     try {
-      body = await readJsonBody(req);
-    } catch (err) {
-      send400(res, `Invalid JSON body: ${String(err)}`);
-      return;
-    }
-
-    let transport;
-    if (sessionId && transports[sessionId]) {
-      transport = transports[sessionId];
-    } else if (!sessionId && body && isInitializeRequest(body)) {
-      transport = new StreamableHTTPServerTransport({
-        sessionIdGenerator: () => randomUUID(),
-        onsessioninitialized: (id) => {
-          transports[id] = transport;
-          console.error(`session ${id} initialized`);
-        },
+      return await bridge.callTool({ name, arguments: args ?? {} }, undefined, {
+        timeout: TOOL_CALL_TIMEOUT_MS,
       });
-      transport.onclose = () => {
-        const sid = transport.sessionId;
-        if (sid && transports[sid]) {
-          delete transports[sid];
-          console.error(`session ${sid} closed`);
-        }
+    } catch (err) {
+      // Upstream reports bad arguments, unknown tools and Google API
+      // failures by throwing. Hand them back as a tool error so the model
+      // reads the message, instead of a JSON-RPC error claude.ai shows as a
+      // generic "Error occurred during tool execution".
+      return {
+        content: [{ type: "text", text: String(err?.message ?? err) }],
+        isError: true,
       };
-      // Fresh Server per session — see file header.
-      const server = createServer(credentialsPath);
-      await server.connect(transport);
-      await transport.handleRequest(req, res, body);
-      return;
-    } else {
-      send400(res, "Bad Request: No valid session ID provided");
-      return;
     }
-    await transport.handleRequest(req, res, body);
-    return;
-  }
+  });
 
-  if (method === "GET" || method === "DELETE") {
-    if (!sessionId || !transports[sessionId]) {
-      send400(res, "Invalid or missing session ID");
-      return;
-    }
-    await transports[sessionId].handleRequest(req, res);
-    return;
-  }
-
-  res.statusCode = 405;
-  res.setHeader("allow", "GET, POST, DELETE");
-  res.end();
+  return server;
 }
 
-const httpServer = http.createServer(async (req, res) => {
-  try {
-    await handle(req, res);
-  } catch (err) {
-    console.error("handleRequest error:", err);
-    if (!res.headersSent) {
-      res.statusCode = 500;
-      res.setHeader("content-type", "application/json");
-      res.end(JSON.stringify({ error: String(err) }));
-    } else {
-      try {
-        res.end();
-      } catch {}
-    }
-  }
+const handler = createMcpHandler(buildServer, {
+  onerror: (err) => console.error("mcp handler error:", err),
 });
+
+const httpServer = http.createServer(
+  toNodeHandler(handler, {
+    onerror: (err) => console.error("node adapter error:", err),
+  }),
+);
 
 httpServer.listen(8080, "0.0.0.0", () => {
   console.error("GSC MCP listening on http://0.0.0.0:8080/");
